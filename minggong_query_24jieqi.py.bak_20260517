@@ -1,0 +1,174 @@
+import csv
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import webbrowser
+from datetime import datetime
+import math
+from lunarcalendar import Lunar, Converter, Solar
+from lunarcalendar._calc import specified_solar_term
+def format_bazi_ascii_box(basic_info, monthly_rows):
+    col_widths = [12] + [6] * 12
+    months = ["正月", "二月", "三月", "四月", "五月", "六月",
+              "七月", "八月", "九月", "十月", "冬月", "腊月"]
+
+    def sep_line(left, mid, right, fill):
+        parts = [fill * w for w in col_widths]
+        return left + mid.join(parts) + right
+
+    result = ""
+    result += sep_line("┌", "┬", "┐", "─") + "\n"
+    for label, value in basic_info:
+        result += f"│ {label:<10} │ {value:<10} │\n"
+    result += sep_line("├", "┼", "┤", "─") + "\n"
+
+    header = ["月\\月份"] + months
+    result += "│" + "│".join(f"{c:^{col_widths[i]}}" for i, c in enumerate(header)) + "│\n"
+    result += sep_line("├", "┼", "┤", "─") + "\n"
+
+    for label, row in monthly_rows:
+        line = [label] + row
+        result += "│" + "│".join(f"{line[i]:^{col_widths[i]}}" for i in range(len(line))) + "│\n"
+
+    result += sep_line("└", "┴", "┘", "─") + "\n"
+    return result
+# 支与干的度数表
+dizhi_list = ['寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥', '子', '丑']
+tiangan_list = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸']
+
+branch_cycle = ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥']
+
+from lunarcalendar import solarterm
+
+# 24 节气名单（用于定位中气）
+zhongqi_indexes = list(range(2, 25, 2))  # 2,4,...,24
+
+# 岁前十二神定义
+SUQIAN_12SHEN_NAMES = ['太岁', '太阳', '丧门', '太阴', '官符', '死符', '岁破', '龙德', '白虎', '福星', '吊客', '病符']
+MAQIAN_12SHEN_NAMES = ['马前一', '马前二', '马前三', '马前四', '马前五', '马前六', '马前七', '马前八', '马前九', '马前十', '马前十一', '马前十二']
+BOSHI_12SHEN_NAMES = ['博士一', '博士二', '博士三', '博士四', '博士五', '博士六', '博士七', '博士八', '博士九', '博士十', '博士十一', '博士十二']
+
+# 获取月支
+month_dz_list = ['寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥', '子', '丑']
+
+def get_dizhi_num(dz):
+    try:
+        return dizhi_list.index(dz) + 1
+    except ValueError:
+        return None
+
+def get_tiangan_num(tg):
+    try:
+        return tiangan_list.index(tg) + 1
+    except ValueError:
+        return None
+
+def dizhi_by_num(num):
+    return dizhi_list[(num - 1) % 12]
+
+def tiangan_by_num(num):
+    return tiangan_list[(num - 1) % 10]
+
+# 表格格式化工具
+def format_12col_table(rows):
+    month_names = ['正月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月']
+    header = ['月'] + month_names
+    table = [header] + [[label] + row for label, row in rows]
+    col_widths = [max(len(str(cell)) for cell in column) + 2 for column in zip(*table)]
+    lines = []
+    lines.append(''.join(str(cell).ljust(col_widths[i]) for i, cell in enumerate(header)))
+    lines.append(''.join('-' * col_widths[i] for i in range(len(col_widths))))
+    for label, row in rows:
+        line = str(label).ljust(col_widths[0])
+        for i, cell in enumerate(row, 1):
+            line += str(cell).ljust(col_widths[i])
+        lines.append(line)
+    return '\n'.join(lines)
+
+# 计算岁前十二神：以年地支起太岁，依序展开12个地支
+# 例如丙午年起午为太岁，下一支未为太阳，依次类推
+def calc_suqian_12shen(start_branch):
+    idx = get_branch_index(start_branch)
+    if idx is None:
+        return None
+    result = []
+    for i, shen in enumerate(SUQIAN_12SHEN_NAMES):
+        branch = branch_cycle[(idx + i) % 12]
+        result.append((branch, shen))
+    return result
+
+# 保留临时的马前/博士实现（避免界面查询时报错），但核心命宫计算恢复为基线实现
+def calc_maqian_12shen_for_year_branch(start_branch):
+    idx = get_branch_index(start_branch)
+    if idx is None:
+        return None
+    result = []
+    for i, shen in enumerate(MAQIAN_12SHEN_NAMES):
+        branch = branch_cycle[(idx + i) % 12]
+        result.append((branch, shen, ''))
+    return result
+
+def calc_boshi_12shen(year_tg):
+    idx = get_tiangan_num(year_tg)
+    if idx is None:
+        return None
+    start_idx = (idx - 1) % 12
+    result = []
+    for i, shen in enumerate(BOSHI_12SHEN_NAMES):
+        branch = branch_cycle[(start_idx + i) % 12]
+        result.append((branch, shen))
+    return result
+
+# 计算命宫地支（恢复基线实现，接受月支字符并默认基数26）
+def calc_minggong_dizhi(month_dz, hour_dz, base=26):
+    m = get_dizhi_num(month_dz)
+    h = get_dizhi_num(hour_dz)
+    if m is None or h is None:
+        return None
+    s = base - (m + h)
+    # 调整到 1..12
+    while s <= 0:
+        s += 12
+    while s > 12:
+        s -= 12
+    return dizhi_by_num(s)
+
+# 计算命宫天干（使用五虎遁法，根据年干确定起月天干后按支位顺数）
+def get_wuhu_start_tiangan(year_tg):
+    y = get_tiangan_num(year_tg)
+    if y is None:
+        return None
+    # 五虎遁：甲己丙，乙庚戊，丙辛庚，丁壬壬，戊癸甲
+    mapping = {
+        1: 3, 6: 3,  # 甲/己 -> 丙
+        2: 5, 7: 5,  # 乙/庚 -> 戊
+        3: 7, 8: 7,  # 丙/辛 -> 庚
+        4: 9, 9: 9,  # 丁/壬 -> 壬
+        5: 1, 10: 1, # 戊/癸 -> 甲
+    }
+    return mapping.get(y)
+
+def calc_minggong_tiangan(year_tg, minggong_dz):
+    start = get_wuhu_start_tiangan(year_tg)
+    d = get_dizhi_num(minggong_dz)
+    if start is None or d is None:
+        return None
+    # 支位从寅开始算起（寅=1）
+    offset = d - 1
+    s = start + offset
+    while s > 10:
+        s -= 10
+    return tiangan_by_num(s)
+
+# 计算月限起点地支
+def calc_yuexian_start_branch(birth_year_dz, tai_sui_dz, minggong_dz):
+    birth_idx = get_dizhi_num(birth_year_dz)
+    tai_idx = get_dizhi_num(tai_sui_dz)
+    ming_idx = get_dizhi_num(minggong_dz)
+    if birth_idx is None or tai_idx is None or ming_idx is None:
+        return None
+    # 以流年太岁与命宫的相距位数，后退出生年支得到正月起点
+    distance = (tai_idx - ming_idx) % 12
+    start_idx = birth_idx - distance
+    while start_idx <= 0:
+        start_idx += 12
+    return dizhi_by_num(start_idx)
