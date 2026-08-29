@@ -8,7 +8,12 @@ import json
 import os
 import urllib.parse
 import urllib.request
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 from lunarcalendar import Lunar, Converter
+import luming_time_rules as luming_rules
 try:
     from lunar_python import Solar as LunarPythonSolar
 except Exception:
@@ -71,6 +76,8 @@ I18N = {
         'btn_debug_birthplace': '调试出生地',
         'radio_pingqi': '平气法',
         'radio_dingqi': '定气法',
+        'check_summer_time': '按夏令时解释输入时间',
+        'summer_time_hint': '提示：该日期符合历史夏令时规则，已自动勾选；若出生记录使用标准时，请取消勾选。',
         'query_info': '输入年月日时后后台自动按出生地真太阳时修正并填柱；出生地改为选择模式（国内/国外三级联动）；默认按定气法取月',
         'btn_query': '查询命宫',
         'btn_yuexian': '月限神煞',
@@ -107,6 +114,8 @@ I18N = {
         'btn_debug_birthplace': '調試出生地',
         'radio_pingqi': '平氣法',
         'radio_dingqi': '定氣法',
+        'check_summer_time': '按夏令時解釋輸入時間',
+        'summer_time_hint': '提示：該日期符合歷史夏令時規則，已自動勾選；若出生記錄使用標準時，請取消勾選。',
         'query_info': '輸入年月日時後後台自動按出生地真太陽時修正並填柱；出生地改為選擇模式（國內/國外三級聯動）；預設按定氣法取月',
         'btn_query': '查詢命宮',
         'btn_yuexian': '月限神煞',
@@ -143,6 +152,8 @@ I18N = {
         'btn_debug_birthplace': 'Debug Birthplace',
         'radio_pingqi': 'Pingqi',
         'radio_dingqi': 'Dingqi',
+        'check_summer_time': 'Interpret input as daylight time',
+        'summer_time_hint': 'Notice: this date matches a historical daylight-time period and was checked automatically. Clear it if the record uses standard time.',
         'query_info': 'After date/time selection, pillars are auto-adjusted by true solar time. Birthplace is selector-only (domestic/overseas 3-level linkage).',
         'btn_query': 'Query Minggong',
         'btn_yuexian': 'Yuexian ShenSha',
@@ -891,6 +902,7 @@ def _set_birthplace_text(text):
     entry_birthplace.delete(0, tk.END)
     entry_birthplace.insert(0, text)
     entry_birthplace.config(state='readonly')
+    refresh_summer_time_suggestion()
 
 
 def _collect_level_options(entries, key):
@@ -1087,6 +1099,7 @@ def apply_language(lang_code):
         ('btn_debug_birthplace', 'btn_debug_birthplace'),
         ('radio_pingqi', 'radio_pingqi'),
         ('radio_dingqi', 'radio_dingqi'),
+        ('check_summer_time', 'check_summer_time'),
         ('btn_query', 'btn_query'),
         ('btn_yuexian', 'btn_yuexian'),
         ('btn_recalc_pillars', 'btn_recalc'),
@@ -1099,6 +1112,10 @@ def apply_language(lang_code):
     info_widget = globals().get('label_query_info')
     if info_widget is not None:
         info_widget.config(text=t('query_info'))
+
+    summer_hint_widget = globals().get('summer_time_hint_label')
+    if summer_hint_widget is not None:
+        summer_hint_widget.config(text=t('summer_time_hint'))
 
     misc_updates = [
         ('label_year_unit', 'unit_year'),
@@ -1563,6 +1580,132 @@ def to_true_solar_datetime(dt, longitude, timezone_meridian=120.0):
     return dt + timedelta(minutes=total_offset_minutes), total_offset_minutes
 
 
+def _is_china_birthplace(text):
+    normalized = normalize_birthplace_text(text)
+    china_prefixes = (
+        '中国', '中國', '北京', '天津', '河北', '山西', '内蒙古', '內蒙古',
+        '辽宁', '遼寧', '吉林', '黑龙江', '黑龍江', '上海', '江苏', '江蘇',
+        '浙江', '安徽', '福建', '江西', '山东', '山東', '河南', '湖北',
+        '湖南', '广东', '廣東', '广西', '廣西', '海南', '重庆', '重慶',
+        '四川', '贵州', '貴州', '云南', '雲南', '西藏', '陕西', '陝西',
+        '甘肃', '甘肅', '青海', '宁夏', '寧夏', '新疆', '香港', '澳门',
+        '澳門', '台湾', '臺灣',
+    )
+    return normalized.startswith(china_prefixes)
+
+
+def is_china_summer_time(dt, birthplace_text):
+    """Return whether a China civil timestamp falls in the historical DST period."""
+    if not _is_china_birthplace(birthplace_text):
+        return False
+    if ZoneInfo is not None:
+        try:
+            aware = dt.replace(tzinfo=ZoneInfo('Asia/Shanghai'))
+            return bool(aware.dst())
+        except Exception:
+            pass
+    # Fallback for Windows installations without an IANA tzdata package.
+    if dt.year == 1986:
+        start, end = datetime(1986, 5, 4, 2), datetime(1986, 9, 14, 2)
+    elif 1987 <= dt.year <= 1991:
+        start = datetime(dt.year, 4, 1) + timedelta(days=(6 - datetime(dt.year, 4, 1).weekday()) % 7)
+        end = datetime(dt.year, 9, 1) + timedelta(days=(6 - datetime(dt.year, 9, 1).weekday()) % 7)
+        if start.day < 11:
+            start += timedelta(days=7)
+        if end.day < 11:
+            end += timedelta(days=7)
+        start = start.replace(hour=2)
+        end = end.replace(hour=2)
+    else:
+        return False
+    return start <= dt < end
+
+
+_SUMMER_TIME_AUTO_KEY = None
+
+
+def refresh_summer_time_suggestion(*_args):
+    """Update the input default when the entered civil date or place changes."""
+    global _SUMMER_TIME_AUTO_KEY
+    required = ('entry_year', 'entry_month', 'entry_day', 'entry_hour', 'entry_birthplace', 'var', 'summer_time_var')
+    if not all(name in globals() for name in required):
+        return
+    try:
+        year = int(entry_year.get())
+        month = int(entry_month.get())
+        day = int(entry_day.get())
+        time_parts = parse_time_text(entry_hour.get())
+        if time_parts is None:
+            return
+        hour, minute = time_parts
+        second = 0
+        if var.get() == '农历':
+            solar = lunar_to_solar(year, month, day)
+            if solar is None:
+                return
+            year, month, day = solar
+        birthplace = entry_birthplace.get()
+        key = (year, month, day, hour, minute, second, birthplace)
+        if key == _SUMMER_TIME_AUTO_KEY:
+            return
+        _SUMMER_TIME_AUTO_KEY = key
+    except (TypeError, ValueError):
+        return
+
+    suggested = is_china_summer_time(datetime(year, month, day, hour, minute, second), birthplace)
+    summer_time_var.set(suggested)
+    if 'summer_time_hint_label' in globals():
+        summer_time_hint_label.config(text=t('summer_time_hint') if suggested else '')
+    if 'true_solar_preview_label' in globals():
+        update_true_solar_preview()
+
+
+def update_true_solar_preview(*_args):
+    """输入页实时显示真太阳时与地址经纬（与 差异.docx image1 参考图一致）。"""
+    if 'true_solar_preview_label' not in globals():
+        return
+    try:
+        year = int(entry_year.get())
+        month = int(entry_month.get())
+        day = int(entry_day.get())
+        time_parts = parse_time_text(entry_hour.get())
+        if time_parts is None:
+            raise ValueError
+        hour, minute = time_parts
+        second = 0
+    except (TypeError, ValueError):
+        true_solar_preview_label.config(text='')
+        return
+    if var.get() == '农历':
+        solar = lunar_to_solar(year, month, day)
+        if solar is None:
+            true_solar_preview_label.config(text='')
+            return
+        year, month, day = solar
+    birthplace = entry_birthplace.get().strip()
+    if not birthplace:
+        true_solar_preview_label.config(text='')
+        return
+    try:
+        ctx = build_true_solar_context(
+            year, month, day, hour, minute, birthplace,
+            summer_time_var.get() if 'summer_time_var' in globals() else None,
+        )
+    except Exception:
+        true_solar_preview_label.config(text='')
+        return
+    if not ctx.get('used_true_solar'):
+        true_solar_preview_label.config(text='')
+        return
+    td = ctx['true_dt']
+    lat = ctx.get('latitude')
+    lon = ctx.get('longitude')
+    coords = f'北纬{lat:.4f} 东经{lon:.4f}' if lat is not None and lon is not None else '未识别'
+    true_solar_preview_label.config(
+        text=f'真太阳时：{td.strftime("%Y-%m-%d %H:%M")}    地址经纬：{coords}'
+    )
+
+
 def format_offset_hhmm(offset_minutes):
     sign = '+' if offset_minutes >= 0 else '-'
     mins = abs(offset_minutes)
@@ -1574,22 +1717,37 @@ def format_offset_hhmm(offset_minutes):
     return f'{sign}{hh:02d}:{mm:02d}'
 
 
-def build_true_solar_context(year, month, day, hour, minute, birthplace_text):
-    input_dt = datetime(year, month, day, hour, minute)
+def classify_zi_hour(true_solar_dt):
+    """Classify子时 after true-solar correction; the civil date changes at 00:00."""
+    if true_solar_dt.hour == 23:
+        return '晚子时'
+    if true_solar_dt.hour == 0:
+        return '早子时'
+    return None
+
+
+def build_true_solar_context(year, month, day, hour, minute, birthplace_text, summer_time_enabled=None, second=0):
+    input_dt = datetime(year, month, day, hour, minute, second)
+    if summer_time_enabled is None:
+        summer_time_enabled = is_china_summer_time(input_dt, birthplace_text)
+    standard_dt = input_dt - timedelta(hours=1) if summer_time_enabled else input_dt
     place_info = resolve_birthplace(birthplace_text)
     longitude = place_info['longitude'] if place_info else None
     latitude = place_info['latitude'] if place_info else None
     place_name = place_info['name'] if place_info else None
     if longitude is None:
-        true_dt = input_dt
+        true_dt = standard_dt
         offset_minutes = 0.0
         used_true_solar = False
     else:
-        true_dt, offset_minutes = to_true_solar_datetime(input_dt, longitude)
+        true_dt, offset_minutes = to_true_solar_datetime(standard_dt, longitude)
         used_true_solar = True
     return {
         'input_dt': input_dt,
+        'standard_dt': standard_dt,
+        'summer_time_enabled': bool(summer_time_enabled),
         'true_dt': true_dt,
+        'zi_hour_type': classify_zi_hour(true_dt),
         'offset_minutes': offset_minutes,
         'used_true_solar': used_true_solar,
         'longitude': longitude,
@@ -1763,37 +1921,64 @@ def build_zhiyi_extra_info(input_dt, true_dt, gender_text, birthplace_text, mont
     return lines
 
 
-def calc_bazi_pillars_with_true_solar(year, month, day, hour, minute, birthplace_text):
-    """按出生地真太阳时计算四柱；若精算库不可用则回退到现有简化算法。"""
-    solar_ctx = build_true_solar_context(year, month, day, hour, minute, birthplace_text)
+def calc_dayun_standard(true_dt, gender_text, sect=2, count=10):
+    """普通排盘·大运：直接调用 lunar_python 官方起运/大运计算，不叠加任何自研规则。"""
+    if LunarPythonSolar is None:
+        return None
+
+    solar = LunarPythonSolar.fromYmdHms(
+        true_dt.year, true_dt.month, true_dt.day,
+        true_dt.hour, true_dt.minute, true_dt.second,
+    )
+    lunar = solar.getLunar()
+    ec = lunar.getEightChar()
+    gender_for_yun = 1 if gender_text == '男' else 0
+    yun = ec.getYun(gender_for_yun, sect)
+    start_dt = _solar_to_datetime(yun.getStartSolar())
+
+    dayun_rows = []
+    for du in yun.getDaYun(count + 1):  # index 0 是起运前的阶段，跳过，只取真正的大运
+        if du.getIndex() < 1:
+            continue
+        dayun_rows.append({
+            'index': du.getIndex(),
+            'ganzhi': du.getGanZhi(),
+            'start_age': du.getStartAge(),
+            'end_age': du.getEndAge(),
+            'start_year': du.getStartYear(),
+            'end_year': du.getEndYear(),
+        })
+
+    return {
+        'forward': yun.isForward(),
+        'start_year': yun.getStartYear(),
+        'start_month': yun.getStartMonth(),
+        'start_day': yun.getStartDay(),
+        'start_hour': yun.getStartHour(),
+        'start_date': start_dt,
+        'dayun': dayun_rows,
+    }
+
+
+def calc_bazi_pillars_with_true_solar(year, month, day, hour, minute, birthplace_text, summer_time_enabled=None):
+    """按出生地真太阳时计算四柱；地点或精算库不可用时拒绝排盘。"""
+    solar_ctx = build_true_solar_context(year, month, day, hour, minute, birthplace_text, summer_time_enabled)
     true_dt = solar_ctx['true_dt']
 
-    if LunarPythonSolar is not None:
-        solar = LunarPythonSolar.fromYmdHms(true_dt.year, true_dt.month, true_dt.day, true_dt.hour, true_dt.minute, true_dt.second)
-        ec = solar.getLunar().getEightChar()
-        return {
-            'year_pillar': ec.getYear(),
-            'month_pillar': ec.getMonth(),
-            'day_pillar': ec.getDay(),
-            'hour_pillar': ec.getTime(),
-            'solar_ctx': solar_ctx,
-            'source': 'lunar_python',
-        }
+    if not solar_ctx['used_true_solar']:
+        raise ValueError('出生地未解析，不能使用真太阳时排盘')
+    if LunarPythonSolar is None:
+        raise RuntimeError('lunar_python 不可用，不能计算精确四柱')
 
-    # 回退：保持原有简化算法
-    year_tg = get_year_tg(true_dt.year)
-    year_dz = get_year_dz(true_dt.year)
-    month_dz, month_num = get_month_dz(true_dt.year, true_dt.month, true_dt.day)
-    month_tg = get_month_tiangan(month_num, year_tg)
-    day_tg, day_dz = calc_day_ganzhi(true_dt.year, true_dt.month, true_dt.day)
-    hour_tg, hour_dz = calc_hour_pillar(day_tg, true_dt.hour)
+    solar = LunarPythonSolar.fromYmdHms(true_dt.year, true_dt.month, true_dt.day, true_dt.hour, true_dt.minute, true_dt.second)
+    ec = solar.getLunar().getEightChar()
     return {
-        'year_pillar': f'{year_tg}{year_dz}' if year_tg and year_dz else None,
-        'month_pillar': f'{month_tg}{month_dz}' if month_tg and month_dz else None,
-        'day_pillar': f'{day_tg}{day_dz}' if day_tg and day_dz else None,
-        'hour_pillar': f'{hour_tg}{hour_dz}' if hour_tg and hour_dz else None,
+        'year_pillar': ec.getYear(),
+        'month_pillar': ec.getMonth(),
+        'day_pillar': ec.getDay(),
+        'hour_pillar': ec.getTime(),
         'solar_ctx': solar_ctx,
-        'source': 'fallback',
+        'source': 'lunar_python',
     }
 
 
@@ -1844,6 +2029,65 @@ def format_12col_table(rows):
             line += str(cell).ljust(col_widths[i])
         lines.append(line)
     return '\n'.join(lines)
+
+# ---------------------------------------------------------------------------
+# 十神（参照图 image6/image9：大运网格每个流年格显示“天干十神 + 地支本气十神”两字简写）
+# ---------------------------------------------------------------------------
+TIANGAN_WUXING = {
+    '甲': '木', '乙': '木', '丙': '火', '丁': '火', '戊': '土',
+    '己': '土', '庚': '金', '辛': '金', '壬': '水', '癸': '水',
+}
+# 地支本气（藏干主气）
+DIZHI_MAIN_QI = {
+    '子': '癸', '丑': '己', '寅': '甲', '卯': '乙', '辰': '戊', '巳': '丙',
+    '午': '丁', '未': '己', '申': '庚', '酉': '辛', '戌': '戊', '亥': '壬',
+}
+_WX_SHENG = {'木': '火', '火': '土', '土': '金', '金': '水', '水': '木'}  # 我生
+_WX_KE = {'木': '土', '土': '水', '水': '火', '火': '金', '金': '木'}  # 我克
+
+TEN_GOD_NAMES = ['比肩', '劫财', '食神', '伤官', '偏财', '正财', '七杀', '正官', '偏印', '正印']
+TEN_GOD_ABBR = {
+    '比肩': '比', '劫财': '劫', '食神': '食', '伤官': '伤',
+    '偏财': '才', '正财': '财', '七杀': '杀', '正官': '官',
+    '偏印': '枭', '正印': '印',
+}
+TEN_GOD_COLORS = {
+    '比肩': '#2F5597', '劫财': '#5B9BD5',
+    '食神': '#00B050', '伤官': '#538135',
+    '偏财': '#C55A11', '正财': '#E36C09',
+    '七杀': '#C00000', '正官': '#FF0000',
+    '偏印': '#7030A0', '正印': '#8064A2',
+}
+
+
+def calc_stem_ten_god(day_stem, target_stem):
+    """目标天干相对日主的十神（标准十神表：同五行比劫；我生食伤；我克财；克我官杀；生我印）。"""
+    if day_stem not in TIANGAN_WUXING or target_stem not in TIANGAN_WUXING:
+        return ''
+    dw = TIANGAN_WUXING[day_stem]
+    tw = TIANGAN_WUXING[target_stem]
+    same_polarity = (day_stem in YANG_TIANGAN) == (target_stem in YANG_TIANGAN)
+    if dw == tw:
+        return '比肩' if same_polarity else '劫财'
+    if _WX_SHENG[dw] == tw:
+        return '食神' if same_polarity else '伤官'
+    if _WX_KE[dw] == tw:
+        return '偏财' if same_polarity else '正财'
+    if _WX_KE[tw] == dw:
+        return '七杀' if same_polarity else '正官'
+    if _WX_SHENG[tw] == dw:
+        return '偏印' if same_polarity else '正印'
+    return ''
+
+
+def calc_flow_year_ten_god(day_stem, year_ganzhi):
+    """流年格十神对：返回 (天干十神, 地支本气十神)，与参照图“杀食/才枭/财印”等两字简写格式对应。"""
+    if not day_stem or not year_ganzhi or len(year_ganzhi) < 2:
+        return ('', '')
+    tg_god = calc_stem_ten_god(day_stem, year_ganzhi[0])
+    main_qi = DIZHI_MAIN_QI.get(year_ganzhi[1])
+    dz_god = calc_stem_ten_god(day_stem, main_qi) if main_qi else ''
+    return (tg_god, dz_god)
 
 # 岁前十二神定义
 SUQIAN_12SHEN_NAMES = ['太岁', '太阳', '丧门', '太阴', '官符', '死符', '岁破', '龙德', '白虎', '福星', '吊客', '病符']
@@ -2240,27 +2484,44 @@ def update_pillars_from_date():
         year, month, day = solar
 
     birthplace_text = entry_birthplace.get() if 'entry_birthplace' in globals() else ''
-    bazi_info = calc_bazi_pillars_with_true_solar(year, month, day, hour, minute, birthplace_text)
+    try:
+        bazi_info = calc_bazi_pillars_with_true_solar(year, month, day, hour, minute, birthplace_text)
+    except (ValueError, RuntimeError):
+        return
     year_pillar = bazi_info.get('year_pillar')
     month_pillar = bazi_info.get('month_pillar')
     day_pillar = bazi_info.get('day_pillar')
     hour_pillar = bazi_info.get('hour_pillar')
-    # 仅在对应的八字输入框为空时才自动填充，避免覆盖用户手工修改的数据
+    # 四柱由当前出生时间、地点和真太阳时唯一决定，必须覆盖旧值，避免跨地点/时间复用旧柱
     try:
-        if year_pillar and not entry_year_pillar.get().strip():
+        if year_pillar:
             entry_year_pillar.delete(0, tk.END)
             entry_year_pillar.insert(0, year_pillar)
-        if month_pillar and not entry_month_pillar.get().strip():
+        if month_pillar:
             entry_month_pillar.delete(0, tk.END)
             entry_month_pillar.insert(0, month_pillar)
-        if day_pillar and not entry_day_pillar.get().strip():
+        if day_pillar:
             entry_day_pillar.delete(0, tk.END)
             entry_day_pillar.insert(0, day_pillar)
-        if hour_pillar and not entry_hour_pillar.get().strip():
+        if hour_pillar:
             entry_hour_pillar.delete(0, tk.END)
             entry_hour_pillar.insert(0, hour_pillar)
     except NameError:
         # 如果在调用时相关 Entry 还未创建，则忽略自动填充
+        pass
+    refresh_dun_display()
+
+
+def refresh_dun_display():
+    """按当前年柱天干刷新日柱/时柱周围的五虎遁提示，不影响四柱本身的取值。"""
+    try:
+        year_pillar_str = entry_year_pillar.get().strip()
+        year_tg = year_pillar_str[0] if year_pillar_str else ''
+        if hasattr(entry_day_pillar, 'update_dun'):
+            entry_day_pillar.update_dun(year_tg)
+        if hasattr(entry_hour_pillar, 'update_dun'):
+            entry_hour_pillar.update_dun(year_tg)
+    except NameError:
         pass
 
 
@@ -2342,6 +2603,83 @@ def parse_hour_text(hour_text):
 
 month_names = ['正月','二月','三月','四月','五月','六月','七月','八月','九月','十月','冬月','腊月']
 
+def format_summary_lines(lines, per_line=3, sep='    '):
+    """将多条摘要字段按 per_line 个合并为一行，减少纵向占用高度。"""
+    grouped = [sep.join(lines[i:i + per_line]) for i in range(0, len(lines), per_line)]
+    return '\n'.join(grouped)
+
+
+class PillarEntry:
+    """天干/地支纵向两行展示的输入框；对外暴露 get/delete/insert，与 tk.Entry 用法保持一致，不改变取值逻辑。"""
+
+    def __init__(self, parent, width=3):
+        self.frame = tk.Frame(parent, bd=1, relief='solid')
+        self.tg_var = tk.StringVar()
+        self.dz_var = tk.StringVar()
+        self.tg_entry = tk.Entry(self.frame, width=width, textvariable=self.tg_var, justify='center',
+                                  fg='#8B0000', bd=0, highlightthickness=0)
+        self.dz_entry = tk.Entry(self.frame, width=width, textvariable=self.dz_var, justify='center',
+                                  fg='#00008B', bd=0, highlightthickness=0)
+        self.tg_entry.grid(row=0, column=0)
+        self.dz_entry.grid(row=1, column=0)
+
+    def grid(self, **kwargs):
+        self.frame.grid(**kwargs)
+
+    def get(self):
+        return (self.tg_var.get() + self.dz_var.get()).strip()
+
+    def delete(self, start, end):
+        self.tg_var.set('')
+        self.dz_var.set('')
+
+    def insert(self, index, text):
+        text = (text or '').strip()
+        self.tg_var.set(text[0] if len(text) >= 1 else '')
+        self.dz_var.set(text[1] if len(text) >= 2 else '')
+
+
+class DunPillarEntry:
+    """在天干地支两行展示的基础上，围绕柱位上下追加五虎遁的"遁干/遁支"提示；
+    对外接口仍与 tk.Entry 一致（get/delete/insert），不影响原有取值逻辑。"""
+
+    def __init__(self, parent, width=3):
+        self.outer = tk.Frame(parent)
+        self.dun_gan_label = tk.Label(self.outer, text='', font=('TkDefaultFont', 8), fg='#555555')
+        self.dun_gan_label.pack()
+        self.pillar = PillarEntry(self.outer, width=width)
+        self.pillar.frame.pack()
+        self.dun_zhi_label = tk.Label(self.outer, text='', font=('TkDefaultFont', 8), fg='#555555')
+        self.dun_zhi_label.pack()
+
+    def grid(self, **kwargs):
+        self.outer.grid(**kwargs)
+
+    def get(self):
+        return self.pillar.get()
+
+    def delete(self, start, end):
+        self.pillar.delete(start, end)
+
+    def insert(self, index, text):
+        self.pillar.insert(index, text)
+
+    def update_dun(self, year_tg):
+        """按年干用五虎遁计算：遁支=柱地支正向查表得天干；遁干=柱天干反向查表得地支（可能有两个）。"""
+        pillar_str = self.get()
+        if not year_tg or len(pillar_str) < 2:
+            self.dun_gan_label.config(text='')
+            self.dun_zhi_label.config(text='')
+            return
+        stem, branch = pillar_str[0], pillar_str[1]
+        zhi_stem = get_wuhu_dun_month_tiangan(year_tg, branch)
+        dun_zhi_text = f'{zhi_stem}{branch}' if zhi_stem else ''
+        gan_branches = [b for b in dizhi_list if get_wuhu_dun_month_tiangan(year_tg, b) == stem]
+        dun_gan_text = ' '.join(f'{stem}{b}' for b in gan_branches)
+        self.dun_gan_label.config(text=dun_gan_text)
+        self.dun_zhi_label.config(text=dun_zhi_text)
+
+
 def clear_result_table():
     for item in result_table.get_children():
         result_table.delete(item)
@@ -2351,6 +2689,7 @@ def display_result(title, content):
     result_title_label.config(text=title)
     result_info_label.config(text=content)
     clear_result_table()
+    show_result_page()
 
 
 def display_result_table(title, summary, rows):
@@ -2359,6 +2698,427 @@ def display_result_table(title, summary, rows):
     clear_result_table()
     for label, row in rows:
         result_table.insert('', 'end', values=[label] + row)
+    show_result_page()
+
+
+def show_input_page():
+    result_page.pack_forget()
+    input_page.pack(fill='both', expand=True)
+
+
+def show_result_page():
+    input_page.pack_forget()
+    result_page.pack(fill='both', expand=True)
+
+
+def render_standard_dayun_table(table, dayun_rows, expand_all=True):
+    """将既有普通排盘数据按目标界面渲染为逐步大运表，不参与计算。
+    两层结构：大运（父行）→ 流年（子行）；流月不再作为孙行，改由独立的横向流月条展示。
+    expand_all=True 时默认展开大运层，使全部流年行直接可见。
+    """
+    columns = ('序号', '大运', '起始年龄', '结束年龄', '起始年份', '结束年份')
+    table.configure(columns=columns, show='tree headings')
+    for column in columns:
+        table.heading(column, text=column)
+        table.column(column, width=108 if column != '大运' else 88, anchor='center')
+    # 展开树形结构需要为层级指示留出空间
+    table.column('#0', width=150, minwidth=60, stretch=False)
+    table.heading('#0', text='')
+
+    # 彩色层级：大运（浅蓝），流年（白色）
+    table.tag_configure('dayun', background='#E8F0FE')
+    table.tag_configure('flow_year', background='#FFFFFF')
+
+    for row in dayun_rows:
+        # 大运父行
+        dayun_iid = f"dy_{row['index']}"
+        table.insert('', 'end', iid=dayun_iid, values=(
+            row['index'], row['ganzhi'], row['start_age'], row['end_age'],
+            row['start_year'], row['end_year'],
+        ), tags=('dayun',))
+
+        # 流年子行：每步大运覆盖的年份逐一展开（流月由横向流月条按选中流年切换）
+        for year in range(row['start_year'], row['end_year'] + 1):
+            flow_ganzhi = get_year_tg(year) + get_year_dz(year)
+            flow_iid = f"dy_{row['index']}_y{year}"
+            table.insert(dayun_iid, 'end', iid=flow_iid, values=(
+                '', '', '', '',
+                year, flow_ganzhi,
+            ), tags=('flow_year',))
+
+    if expand_all:
+        # 默认展开大运层，使全部流年行可见
+        for dayun_iid in table.get_children(''):
+            table.item(dayun_iid, open=True)
+
+
+def format_dayun_step_text(row):
+    """把一步大运转为步骤头文本（大运位于该步流年上方）。"""
+    return f"大运   {row['ganzhi']}\n{row['start_year']}\n{row['start_age']}岁"
+
+
+def find_dayun_block(dayun_rows, year):
+    """返回覆盖给定年份的大运行（按起始/结束年份查找），找不到返回 None。"""
+    for row in dayun_rows:
+        s, e = row.get('start_year'), row.get('end_year')
+        if s is not None and e is not None and s <= year <= e:
+            return row
+    return None
+
+
+def create_flow_month_strip(parent):
+    """流月条（含步骤头）：上为“大运”行，其下为“流年”行，再下为 正月~十二月 12 个流月小格。
+    返回 (frame, update_fn, cells)；update_fn(year) 填入该年份的 12 个流月并刷新“流年”行；
+    update_fn.set_step(dayun_text) 刷新“大运”行（位于流年上方）。"""
+    month_names = ['正月', '二月', '三月', '四月', '五月', '六月',
+                   '七月', '八月', '九月', '十月', '十一月', '十二月']
+    frame = tk.Frame(parent)
+    # 大运行：该步大运（列示在流年上方）
+    dayun_label = tk.Label(frame, text='', anchor='w', fg='#1F4E79',
+                           font=('TkDefaultFont', 10, 'bold'))
+    dayun_label.pack(fill='x', padx=(0, 4))
+    # 流年行：该步流年（在大运下方）
+    flowyear_label = tk.Label(frame, text='', anchor='w', fg='#8B4513',
+                              font=('TkDefaultFont', 10, 'bold'))
+    flowyear_label.pack(fill='x', padx=(0, 4))
+    # 流月小格横排行（在流年下方）
+    month_row = tk.Frame(frame)
+    month_row.pack(fill='x', padx=(0, 4))
+    tk.Label(month_row, text=f"{rt('row_flow_month')}：", fg='#333333').pack(
+        side='left', padx=(0, 4))
+    cells = []
+    for month_name in month_names:
+        cell = tk.Frame(month_row, bd=1, relief='ridge', padx=4, pady=1)
+        tk.Label(cell, text=month_name, font=('TkDefaultFont', 9), fg='#555555').pack()
+        gz_lbl = tk.Label(cell, text='', font=('TkDefaultFont', 10, 'bold'), fg='#8B0000')
+        gz_lbl.pack()
+        cell.pack(side='left', padx=1)
+        cells.append((month_name, gz_lbl))
+
+    def update_fn(year):
+        liuyue = calc_liuyue(get_year_tg(year))
+        if liuyue is None:
+            for _, gz_lbl in cells:
+                gz_lbl.config(text='')
+            return
+        for (_, gz_lbl), (_, stem, branch) in zip(cells, liuyue):
+            gz_lbl.config(text=f'{stem}{branch}')
+        flowyear_label.config(
+            text=f"{rt('summary_flow_year')}：{year} {get_year_tg(year)}{get_year_dz(year)}")
+
+    def set_step(dayun_text):
+        dayun_label.config(text=dayun_text)
+
+    update_fn.set_step = set_step
+    return frame, update_fn, cells
+
+
+def bind_flow_month_strip_update(table, update_fn):
+    """绑定 Treeview 选中事件：选中流年行 → 切换横向流月条并更新步骤头（大运在流年上方）；
+    选中大运行则保持流月不变。"""
+    def on_select(event):
+        selected = table.selection()
+        if not selected:
+            return
+        iid = selected[0]
+        if '_y' not in iid:
+            return
+        year_text = iid.rsplit('_y', 1)[1]
+        if not year_text.isdigit():
+            return
+        update_fn(int(year_text))
+        # 步骤头：从父行（大运）读取该步大运，列示在流年上方
+        step_fn = getattr(update_fn, 'set_step', None)
+        if step_fn is None:
+            return
+        parent_iid = table.parent(iid) if table.exists(iid) else ''
+        if not parent_iid or not table.exists(parent_iid):
+            return
+        vals = table.item(parent_iid, 'values')
+        if len(vals) >= 6:
+            step_row = {
+                'ganzhi': vals[1], 'start_age': vals[2], 'end_age': vals[3],
+                'start_year': vals[4], 'end_year': vals[5],
+            }
+            step_fn(format_dayun_step_text(step_row))
+
+    table.bind('<<TreeviewSelect>>', on_select)
+    return on_select
+
+
+class DayunFlowGrid(tk.Frame):
+    """参照图（image6/image9）的大运密集网格（表二布局）：
+    顶行“大运：干支链” + 每步大运一列：块头（起运岁/起运年份/大运干支） + 10 个流年格纵向堆叠，
+    多步大运并列成列。每个流年格 = 流年年份（灰） + 流年干支（加粗），单行紧凑放置，
+    10 格全部可见；按需求不再显示格内十神简写。
+    点击流年格 → on_year_select(year, block_row) 联动下方横向流月条。
+    """
+
+    HEADER_BG = '#DEEBF7'
+    CHAIN_BG = '#E8F0FE'
+    SELECT_BG = '#FFF2CC'
+
+    def __init__(self, parent, on_year_select=None):
+        super().__init__(parent)
+        self.on_year_select = on_year_select
+        self.year_cells = {}      # year -> {'frame','year_lbl','gz'}
+        self.year_block = {}      # year -> 大运行(dict)
+        self.selected_year = None
+        canvas_holder = tk.Frame(self)
+        canvas_holder.pack(fill='both', expand=True)
+        self.canvas = tk.Canvas(canvas_holder, highlightthickness=0, bg='#FFFFFF')
+        vsb = ttk.Scrollbar(canvas_holder, orient='vertical', command=self.canvas.yview)
+        hsb = ttk.Scrollbar(self, orient='horizontal', command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        hsb.pack(side='bottom', fill='x')
+        vsb.pack(side='right', fill='y')
+        self.canvas.pack(side='left', fill='both', expand=True)
+        self.body = tk.Frame(self.canvas, bg='#FFFFFF')
+        self._win = self.canvas.create_window((0, 0), window=self.body, anchor='nw')
+        self.body.bind('<Configure>', lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
+
+    def render(self, dayun_rows, default_year=None):
+        for child in self.body.winfo_children():
+            child.destroy()
+        self.year_cells = {}
+        self.year_block = {}
+        self.selected_year = default_year
+        if not dayun_rows:
+            return
+        body = self.body
+        chain = '  '.join((row.get('ganzhi') or '') for row in dayun_rows)
+        tk.Label(body, text=f'大运：{chain}', anchor='w', font=('TkDefaultFont', 9, 'bold'),
+                 fg='#1F4E79', bg=self.CHAIN_BG).grid(
+                     row=0, column=0, columnspan=len(dayun_rows), sticky='ew',
+                     padx=2, pady=(0, 1), ipady=1)
+        for c, row in enumerate(dayun_rows):
+            band = tk.Frame(body, bg='#FFFFFF')
+            band.grid(row=1, column=c, sticky='n', padx=2, pady=1)
+            self._build_header(band, row)
+            start_year = int(row.get('start_year') or 0)
+            end_year = int(row.get('end_year') or (start_year + 9))
+            for year in range(start_year, end_year + 1):
+                gz = get_year_tg(year) + get_year_dz(year)
+                info = self._build_year_cell(band, year, gz)
+                self.year_cells[year] = info
+                self.year_block[year] = row
+        self._refresh_selection()
+
+    def _build_header(self, parent, row):
+        frame = tk.Frame(parent, bg=self.HEADER_BG, bd=1, relief='ridge')
+        tk.Label(frame, text=f"{row.get('start_age') or '?'}岁", font=('TkDefaultFont', 8),
+                 fg='#404040', bg=self.HEADER_BG).pack()
+        tk.Label(frame, text=str(row.get('start_year') or '?'), font=('TkDefaultFont', 8),
+                 fg='#404040', bg=self.HEADER_BG).pack()
+        tk.Label(frame, text=row.get('ganzhi') or '', font=('TkDefaultFont', 9, 'bold'),
+                 fg='#1F4E79', bg=self.HEADER_BG, width=5).pack()
+        frame.pack(pady=(0, 1))
+
+    def _build_year_cell(self, parent, year, ganzhi):
+        """每个流年格 = 流年年份（灰） + 流年干支（加粗），单行紧凑放置。
+        原格内“天干十神/地支本气十神”简写块已按需求移除，改用流年年份；
+        10 格单行堆叠，全部可见。"""
+        cell = tk.Frame(parent, bd=1, relief='ridge', bg='#FFFFFF')
+        year_lbl = tk.Label(cell, text=str(year), font=('TkDefaultFont', 8),
+                            fg='#8A8A8A', bg='#FFFFFF')
+        year_lbl.pack(side='left', padx=(3, 0))
+        gz_lbl = tk.Label(cell, text=ganzhi, font=('TkDefaultFont', 8, 'bold'),
+                          fg='#333333', bg='#FFFFFF')
+        gz_lbl.pack(side='left', padx=(0, 3))
+        for widget in (cell, year_lbl, gz_lbl):
+            widget.bind('<Button-1>', lambda e, y=year: self._select_year(y))
+        cell.pack(pady=0)
+        return {'frame': cell, 'year_lbl': year_lbl, 'gz': gz_lbl}
+
+    def _select_year(self, year):
+        if year not in self.year_cells or year not in self.year_block:
+            return
+        self.selected_year = year
+        self._refresh_selection()
+        if self.on_year_select is not None:
+            self.on_year_select(year, self.year_block[year])
+
+    def _refresh_selection(self):
+        for year, info in self.year_cells.items():
+            bg = self.SELECT_BG if year == self.selected_year else '#FFFFFF'
+            info['frame'].config(bg=bg)
+            info['gz'].config(bg=bg)
+            info['year_lbl'].config(bg=bg)
+
+
+def query_ordinary():
+    """展示现有普通排盘（大运）计算结果，不改变计算逻辑。"""
+    try:
+        year = int(entry_year.get())
+        month = int(entry_month.get())
+        day = int(entry_day.get())
+        time_parts = parse_time_text(entry_hour.get())
+        if time_parts is None:
+            raise ValueError
+        hour, minute = time_parts
+    except ValueError:
+        messagebox.showerror(rt('err_title'), rt('err_invalid_datetime'))
+        return
+
+    if var.get() == '农历':
+        solar = lunar_to_solar(year, month, day)
+        if solar is None:
+            messagebox.showerror(rt('err_title'), rt('err_invalid_lunar'))
+            return
+        year, month, day = solar
+
+    birthplace_text = entry_birthplace.get() if 'entry_birthplace' in globals() else ''
+    solar_ctx = build_true_solar_context(
+        year, month, day, hour, minute, birthplace_text,
+        summer_time_var.get() if 'summer_time_var' in globals() else None,
+    )
+    if not solar_ctx['used_true_solar']:
+        messagebox.showerror(rt('err_title'), '出生地未解析，无法使用真太阳时排盘')
+        return
+
+    gender = gender_var.get()
+    result = calc_dayun_standard(solar_ctx['true_dt'], gender, sect=2, count=10)
+    if result is None:
+        messagebox.showerror(rt('err_title'), '普通排盘计算库不可用')
+        return
+
+    bazi = calc_bazi_pillars_with_true_solar(
+        year, month, day, hour, minute, birthplace_text,
+        summer_time_var.get() if 'summer_time_var' in globals() else None,
+    )
+    summary_lines = [
+        f"普通排盘：{'顺排' if result['forward'] else '逆排'}",
+        f"八字：{bazi['year_pillar']} {bazi['month_pillar']} {bazi['day_pillar']} {bazi['hour_pillar']}",
+        f"标准时：{solar_ctx['input_dt'].strftime('%Y-%m-%d %H:%M')}    出生地：{solar_ctx['place_name']}",
+        f"真太阳时修正量：{format_offset_hhmm(solar_ctx['offset_minutes'])}    修正后时间：{solar_ctx['true_dt'].strftime('%Y-%m-%d %H:%M')}",
+        f"早晚子时：{solar_ctx['zi_hour_type'] or '非子时'}",
+        f"起运：出生后{result['start_year']}年{result['start_month']}月{result['start_day']}天{result['start_hour']}小时    {'顺排' if result['forward'] else '逆排'}",
+    ]
+    result_ordinary_title_label.config(text='普通排盘')
+    result_ordinary_info_label.config(text='\n'.join(summary_lines), justify='left')
+    # 密集网格渲染（参照图）：大运块头 + 流年干支；格内显示流年年份（不再显示十神）
+    ordinary_flow_grid.render(result['dayun'], default_year=datetime.now().year)
+    # 默认未选中流年时：横向流月条显示“当下时间年份”的 12 个流月，并显示该年所属大运步骤头（大运在流年上方）
+    if hasattr(ordinary_flow_month_update, 'set_step'):
+        step = find_dayun_block(result['dayun'], datetime.now().year)
+        if step is None:
+            step = result['dayun'][0]
+        ordinary_flow_month_update.set_step(format_dayun_step_text(step))
+    ordinary_flow_month_update(datetime.now().year)
+    result_notebook.select(ordinary_result_frame)
+
+
+def start_chart_query():
+    """完成输入后进入结果页，并先展示基本命盘。"""
+    query_minggong()
+    query_yuexian()
+
+
+def on_result_tab_changed(_event=None):
+    if result_notebook.tab(result_notebook.select(), 'text') == '普通排盘':
+        query_ordinary()
+
+
+def query_luming():
+    """根据禄命页签的人工选项生成独立禄命大运结果。"""
+    try:
+        year = int(entry_year.get())
+        month = int(entry_month.get())
+        day = int(entry_day.get())
+        time_parts = parse_time_text(entry_hour.get())
+        if time_parts is None:
+            raise ValueError
+        hour, minute = time_parts
+    except ValueError:
+        messagebox.showerror(rt('err_title'), rt('err_invalid_datetime'))
+        return
+
+    if var.get() == '农历':
+        solar = lunar_to_solar(year, month, day)
+        if solar is None:
+            messagebox.showerror(rt('err_title'), rt('err_invalid_lunar'))
+            return
+        year, month, day = solar
+
+    birthplace_text = entry_birthplace.get() if 'entry_birthplace' in globals() else ''
+    summer_enabled = summer_time_var.get() if 'summer_time_var' in globals() else None
+    solar_ctx = build_true_solar_context(year, month, day, hour, minute, birthplace_text, summer_enabled)
+    if not solar_ctx['used_true_solar']:
+        messagebox.showerror(rt('err_title'), '出生地未解析，无法使用真太阳时排盘')
+        return
+
+    try:
+        bazi = calc_bazi_pillars_with_true_solar(
+            year, month, day, hour, minute, birthplace_text, summer_enabled
+        )
+        solar = LunarPythonSolar.fromYmdHms(
+            solar_ctx['true_dt'].year, solar_ctx['true_dt'].month,
+            solar_ctx['true_dt'].day, solar_ctx['true_dt'].hour,
+            solar_ctx['true_dt'].minute, solar_ctx['true_dt'].second,
+        )
+        lunar = solar.getLunar()
+        previous_jie = _solar_to_datetime(lunar.getPrevJieQi().getSolar())
+        next_jie = _solar_to_datetime(lunar.getNextJieQi().getSolar())
+        options = luming_rules.build_luming_options(
+            luming_base_var.get().replace('排盘', ''),
+            luming_taiji_var.get(),
+            luming_dayun_var.get().replace('排大运', ''),
+            luming_direction_var.get().replace('大运', ''),
+        )
+        qiyun = luming_rules.calculate_qiyun(
+            solar_ctx['true_dt'], previous_jie, next_jie,
+            bazi['year_pillar'][0], gender_var.get(), precision='minute',
+        )
+        pillars = {
+            '年柱': bazi['year_pillar'], '月柱': bazi['month_pillar'],
+            '日柱': bazi['day_pillar'], '时柱': bazi['hour_pillar'],
+        }
+        dayun = luming_rules.generate_luming_dayun(pillars, options, qiyun)
+    except (AttributeError, IndexError, TypeError, ValueError, RuntimeError) as exc:
+        messagebox.showerror(rt('err_title'), f'禄命排盘计算失败：{exc}')
+        return
+
+    result = {'pillars': pillars, 'qiyun': qiyun, 'dayun': dayun}
+    snapshot = luming_rules.build_snapshot(
+        {'year': year, 'month': month, 'day': day, 'hour': hour, 'minute': minute,
+         'gender': gender_var.get(), 'birthplace': birthplace_text},
+        {key: str(value) for key, value in solar_ctx.items()},
+        {'options': options, **result},
+    )
+    snapshot_path = os.path.join(
+        os.path.dirname(__file__), 'output', 'luming_snapshots',
+        f'luming_{datetime.now().strftime("%Y%m%d_%H%M%S_%f")}.json',
+    )
+    luming_rules.save_snapshot(snapshot, snapshot_path)
+    luming_result_info_label.config(
+        text=(f"八字：{' '.join(pillars.values())}\n"
+              f"早晚子时：{solar_ctx.get('zi_hour_type') or '非子时'}\n"
+              f"起运：{qiyun['age_text']}（{qiyun['direction']}，方案{qiyun['scheme']}）\n"
+              f"起运时间：{qiyun['start_datetime']}\n"
+              f"立极点：{options['taiji_point']}    大运取柱：{options['dayun_pillar']}    大运方向：{options['direction']}\n"
+              f"快照版本：{snapshot['ruleVersion']} / {snapshot['baseVersion']}\n"
+              f"快照文件：{snapshot_path}"),
+        justify='left',
+    )
+    # 补齐整数字段后按参照图密集网格渲染（大运块头 + 流年干支/十神）。
+    # 禄命采用 10 年/运（同普通排盘与参照图）：起运年龄/年份 +10n，结束=起始+9。
+    qiyun_start_year = qiyun['start_datetime'].year
+    qiyun_start_age = int(qiyun['years'])
+    for row in dayun:
+        row['start_age'] = qiyun_start_age + (row['index'] - 1) * 10
+        row['end_age'] = row['start_age'] + 9
+        row['start_year'] = qiyun_start_year + (row['index'] - 1) * 10
+        row['end_year'] = row['start_year'] + 9
+    # 格内不再显示十神：网格渲染只需大运块头 + 流年干支 + 流年年份
+    luming_flow_grid.render(dayun, default_year=datetime.now().year)
+    # 默认未选中流年时：横向流月条显示“当下时间年份”的 12 个流月，并显示该年所属大运步骤头（大运在流年上方）
+    if hasattr(luming_flow_month_update, 'set_step'):
+        step = find_dayun_block(dayun, datetime.now().year)
+        if step is None:
+            step = dayun[0]
+        luming_flow_month_update.set_step(format_dayun_step_text(step))
+    luming_flow_month_update(datetime.now().year)
+    result_notebook.select(luming_result_frame)
 
 
 def query_minggong():
@@ -2386,7 +3146,13 @@ def query_minggong():
         year, month, day = solar
 
     birthplace_text = entry_birthplace.get() if 'entry_birthplace' in globals() else ''
-    solar_ctx = build_true_solar_context(year, month, day, hour, minute, birthplace_text)
+    solar_ctx = build_true_solar_context(
+        year, month, day, hour, minute, birthplace_text,
+        summer_time_var.get() if 'summer_time_var' in globals() else None,
+    )
+    if not solar_ctx['used_true_solar']:
+        messagebox.showerror(rt('err_title'), '出生地未解析，无法使用真太阳时排盘')
+        return
     input_dt = solar_ctx['input_dt']
     true_dt = solar_ctx['true_dt']
     offset_minutes = solar_ctx['offset_minutes']
@@ -2395,7 +3161,7 @@ def query_minggong():
     latitude = solar_ctx['latitude']
     place_name = solar_ctx['place_name']
 
-    year_tg = get_year_tg(year)
+    year_tg = get_year_tg(true_dt.year)
     hour_dz = get_hour_dz(true_dt.hour)
 
     month_dz, month_num = get_minggong_month_dz_and_num(true_dt)
@@ -2446,10 +3212,10 @@ def query_minggong():
     solar_debug_lines.append(f"{rt('summary_final_hour')}：{hour_dz}")
 
     extra_info_lines = build_zhiyi_extra_info(input_dt, true_dt, gender, birthplace_text, month_method_var.get() if 'month_method_var' in globals() else '定气法')
-    solar_info_block = '\n'.join(solar_debug_lines) + '\n'
-    extra_info_block = ('\n'.join(extra_info_lines) + '\n') if extra_info_lines else ''
+    head_lines = [f"{rt('summary_minggong')}：{mg_dz}", f"{rt('year_stem')}：{year_tg}", month_line, f"{rt('hour_branch')}：{hour_dz}"]
+    solar_info_block = format_summary_lines(head_lines + solar_debug_lines) + '\n'
+    extra_info_block = (format_summary_lines(extra_info_lines) + '\n') if extra_info_lines else ''
     result = (
-        f"{rt('summary_minggong')}：{mg_dz}\n{rt('year_stem')}：{year_tg}\n{month_line}\n{rt('hour_branch')}：{hour_dz}\n"
         f'{solar_info_block}'
         f'{extra_info_block}'
         f"({rt('result_input_hint').format(calendar=calendar_str)})\n\n"
@@ -2484,7 +3250,13 @@ def query_yuexian():
         year, month, day = solar
 
     birthplace_text = entry_birthplace.get() if 'entry_birthplace' in globals() else ''
-    solar_ctx = build_true_solar_context(year, month, day, hour, minute, birthplace_text)
+    solar_ctx = build_true_solar_context(
+        year, month, day, hour, minute, birthplace_text,
+        summer_time_var.get() if 'summer_time_var' in globals() else None,
+    )
+    if not solar_ctx['used_true_solar']:
+        messagebox.showerror(rt('err_title'), '出生地未解析，无法使用真太阳时排盘')
+        return
     input_dt = solar_ctx['input_dt']
     true_dt = solar_ctx['true_dt']
     offset_minutes = solar_ctx['offset_minutes']
@@ -2632,36 +3404,51 @@ def query_yuexian():
     extra_info_lines = build_zhiyi_extra_info(input_dt, true_dt, gender, birthplace_text, month_method_var.get() if 'month_method_var' in globals() else '定气法')
     if extra_info_lines:
         summary_lines.extend(extra_info_lines)
-    summary = '\n'.join(summary_lines)
+    summary = format_summary_lines(summary_lines)
     display_result_table(rt('result_title_bazi'), summary, rows)
 
 root = tk.Tk()
 root.title(t('app_title'))
+# 结果表格含13列（项目+12月），默认按内容自适应可能超出屏幕宽度，启动时最大化窗口以完整显示
+try:
+    root.state('zoomed')
+except tk.TclError:
+    root.geometry(f"{root.winfo_screenwidth()}x{root.winfo_screenheight()}+0+0")
 
-frame = tk.Frame(root)
-frame.pack(padx=20, pady=20)
+input_page = tk.Frame(root)
+result_page = tk.Frame(root)
+input_page.pack(fill='both', expand=True)
+
+frame = tk.Frame(input_page)
+frame.pack(padx=12, pady=20, anchor='w')
+
+# 顶部“类型 / 性别 / 语言”行放入独立子容器（占用 col0-13 整行）：其较宽控件不再撑大外层网格
+# 的共享列宽，使下方的日期行（含右侧 出生地/平气法·定气法）在较窄屏幕上也能完整横向显示。
+top_group = tk.Frame(frame)
+top_group.grid(row=0, column=0, columnspan=14, sticky='w')
 
 var = tk.StringVar(value='阳历')
+var.trace_add('write', refresh_summer_time_suggestion)
 
-label_calendar = tk.Label(frame, text=t('label_calendar'))
+label_calendar = tk.Label(top_group, text=t('label_calendar'))
 label_calendar.grid(row=0, column=0, sticky='e')
-radio_solar = tk.Radiobutton(frame, text=t('radio_solar'), variable=var, value='阳历', command=update_pillars_from_date)
+radio_solar = tk.Radiobutton(top_group, text=t('radio_solar'), variable=var, value='阳历', command=update_pillars_from_date)
 radio_solar.grid(row=0, column=1, sticky='w')
-radio_lunar = tk.Radiobutton(frame, text=t('radio_lunar'), variable=var, value='农历', command=update_pillars_from_date)
+radio_lunar = tk.Radiobutton(top_group, text=t('radio_lunar'), variable=var, value='农历', command=update_pillars_from_date)
 radio_lunar.grid(row=0, column=2, sticky='w')
-label_gender = tk.Label(frame, text=t('label_gender'))
-label_gender.grid(row=0, column=3, sticky='e', padx=(20, 0))
+label_gender = tk.Label(top_group, text=t('label_gender'))
+label_gender.grid(row=0, column=3, sticky='e', padx=(8, 0))
 gender_var = tk.StringVar(value='男')
-radio_male = tk.Radiobutton(frame, text=t('radio_male'), variable=gender_var, value='男')
+radio_male = tk.Radiobutton(top_group, text=t('radio_male'), variable=gender_var, value='男')
 radio_male.grid(row=0, column=4, sticky='w')
-radio_female = tk.Radiobutton(frame, text=t('radio_female'), variable=gender_var, value='女')
+radio_female = tk.Radiobutton(top_group, text=t('radio_female'), variable=gender_var, value='女')
 radio_female.grid(row=0, column=5, sticky='w')
 
-label_language = tk.Label(frame, text=t('label_language'))
-label_language.grid(row=0, column=6, sticky='e', padx=(20, 0))
+label_language = tk.Label(top_group, text=t('label_language'))
+label_language.grid(row=0, column=6, sticky='e', padx=(8, 0))
 language_choice_var = tk.StringVar(value='中国（大陆）')
 combo_language = ttk.Combobox(
-    frame,
+    top_group,
     textvariable=language_choice_var,
     values=list(COUNTRY_LANGUAGE_MAP.keys()),
     state='readonly',
@@ -2670,87 +3457,144 @@ combo_language = ttk.Combobox(
 combo_language.grid(row=0, column=7, sticky='w')
 combo_language.bind('<<ComboboxSelected>>', on_language_select)
 
+# 姓名（与 差异.docx image1 参考图一致；仅展示用，不影响排盘计算）
+label_name = tk.Label(top_group, text='姓名')
+label_name.grid(row=0, column=8, sticky='e', padx=(12, 0))
+entry_name = tk.Entry(top_group, width=12)
+entry_name.grid(row=0, column=9, sticky='w')
+entry_name.insert(0, '')
+
 month_method_var = tk.StringVar(value='定气法')
 
 entry_year = tk.Entry(frame, width=6)
 entry_year.grid(row=2, column=0)
 label_year_unit = tk.Label(frame, text=ui_text('unit_year'))
 label_year_unit.grid(row=2, column=1, sticky='w')
-entry_month = tk.Entry(frame, width=4)
+entry_month = tk.Entry(frame, width=3)
 entry_month.grid(row=2, column=2)
 label_month_unit = tk.Label(frame, text=ui_text('unit_month'))
 label_month_unit.grid(row=2, column=3, sticky='w')
-entry_day = tk.Entry(frame, width=4)
+entry_day = tk.Entry(frame, width=3)
 entry_day.grid(row=2, column=4)
 label_day_unit = tk.Label(frame, text=ui_text('unit_day'))
 label_day_unit.grid(row=2, column=5, sticky='w')
-entry_hour = tk.Entry(frame, width=8)
+entry_hour = tk.Entry(frame, width=6)
 entry_hour.grid(row=2, column=6)
 label_hour_unit = tk.Label(frame, text=ui_text('unit_hour'))
 label_hour_unit.grid(row=2, column=7, sticky='w')
 
+summer_time_var = tk.BooleanVar(value=False)
+summer_time_var.trace_add('write', update_true_solar_preview)
+check_summer_time = tk.Checkbutton(
+    frame,
+    text=t('check_summer_time'),
+    variable=summer_time_var,
+)
+check_summer_time.grid(row=3, column=8, columnspan=3, sticky='w', pady=(2, 0))
+summer_time_hint_label = tk.Label(frame, text='', anchor='w', justify='left', fg='#8a4b08')
+summer_time_hint_label.grid(row=3, column=11, columnspan=3, sticky='w', padx=(8, 0), pady=(2, 0))
+# 真太阳时 / 地址经纬 实时预览（与 差异.docx image1 参考图一致：查询页即显示换算结果）
+true_solar_preview_label = tk.Label(frame, text='', anchor='w', justify='left', fg='#2f5d2f')
+true_solar_preview_label.grid(row=4, column=0, columnspan=14, sticky='we', padx=(6, 0), pady=(2, 0))
+
 label_birthplace = tk.Label(frame, text=t('label_birthplace'))
-label_birthplace.grid(row=2, column=8, sticky='e', padx=(12, 0))
-entry_birthplace = tk.Entry(frame, width=18, state='readonly')
+label_birthplace.grid(row=2, column=8, sticky='e', padx=(6, 0))
+entry_birthplace = tk.Entry(frame, width=14, state='readonly')
 entry_birthplace.grid(row=2, column=9, sticky='w')
 btn_pick_birthplace = tk.Button(frame, text=t('btn_pick_birthplace'), command=open_birthplace_selector)
-btn_pick_birthplace.grid(row=2, column=10, sticky='w', padx=(8, 0))
-btn_debug_birthplace = tk.Button(frame, text=t('btn_debug_birthplace'), command=debug_birthplace)
-btn_debug_birthplace.grid(row=2, column=11, sticky='w', padx=(8, 0))
-
-radio_pingqi = tk.Radiobutton(frame, text=t('radio_pingqi'), variable=month_method_var, value='平气法')
-radio_pingqi.grid(row=2, column=12, sticky='w', padx=(12, 0))
-radio_dingqi = tk.Radiobutton(frame, text=t('radio_dingqi'), variable=month_method_var, value='定气法')
-radio_dingqi.grid(row=2, column=13, sticky='w')
+btn_pick_birthplace.grid(row=2, column=10, sticky='w', padx=(4, 0))
 
 entry_year.bind('<FocusOut>', lambda event: update_pillars_from_date())
 entry_month.bind('<FocusOut>', lambda event: update_pillars_from_date())
 entry_day.bind('<FocusOut>', lambda event: update_pillars_from_date())
 entry_hour.bind('<FocusOut>', lambda event: update_pillars_from_date())
+for _date_entry in (entry_year, entry_month, entry_day, entry_hour):
+    _date_entry.bind('<FocusOut>', refresh_summer_time_suggestion, add='+')
+refresh_summer_time_suggestion()
 
-label_query_info = tk.Label(frame, text=t('query_info'))
-label_query_info.grid(row=3, column=0, columnspan=14, pady=(4, 10))
+# 指定命宫 / 流年 / 平气·定气法：按《改写》参照图红框位置内联展示在主输入区；
+# 四柱（自动填柱的可覆盖项）保留在可折叠“高级选项”内。
+advanced_visible_var = tk.BooleanVar(value=False)
+advanced_frame = tk.LabelFrame(frame, text='高级选项（四柱）')
+advanced_frame.grid(row=7, column=0, columnspan=14, sticky='ew')
+advanced_frame.grid_remove()
 
-label_year_pillar = tk.Label(frame, text=ui_text('label_year_pillar'))
-label_year_pillar.grid(row=4, column=0, sticky='e')
-entry_year_pillar = tk.Entry(frame, width=6)
-entry_year_pillar.grid(row=4, column=1)
-label_month_pillar = tk.Label(frame, text=ui_text('label_month_pillar'))
-label_month_pillar.grid(row=4, column=2, sticky='e')
-entry_month_pillar = tk.Entry(frame, width=6)
-entry_month_pillar.grid(row=4, column=3)
-label_day_pillar = tk.Label(frame, text=ui_text('label_day_pillar'))
-label_day_pillar.grid(row=4, column=4, sticky='e')
-entry_day_pillar = tk.Entry(frame, width=6)
-entry_day_pillar.grid(row=4, column=5)
-label_hour_pillar = tk.Label(frame, text=ui_text('label_hour_pillar'))
-label_hour_pillar.grid(row=4, column=6, sticky='e')
-entry_hour_pillar = tk.Entry(frame, width=6)
-entry_hour_pillar.grid(row=4, column=7)
+# 平气法 / 定气法：参照图位于顶部日期行最右侧（出生地选择按钮旁）
+radio_pingqi = tk.Radiobutton(frame, text=t('radio_pingqi'), variable=month_method_var, value='平气法')
+radio_pingqi.grid(row=2, column=11, sticky='w', padx=(6, 0))
+radio_dingqi = tk.Radiobutton(frame, text=t('radio_dingqi'), variable=month_method_var, value='定气法')
+radio_dingqi.grid(row=2, column=12, sticky='w')
 
+
+def toggle_advanced_options():
+    if advanced_visible_var.get():
+        advanced_frame.grid()
+    else:
+        advanced_frame.grid_remove()
+
+
+label_year_pillar = tk.Label(advanced_frame, text=ui_text('label_year_pillar'))
+label_year_pillar.grid(row=0, column=0, sticky='e', padx=(6, 0), pady=4)
+entry_year_pillar = PillarEntry(advanced_frame)
+entry_year_pillar.grid(row=0, column=1)
+label_month_pillar = tk.Label(advanced_frame, text=ui_text('label_month_pillar'))
+label_month_pillar.grid(row=0, column=2, sticky='e', padx=(12, 0), pady=4)
+entry_month_pillar = PillarEntry(advanced_frame)
+entry_month_pillar.grid(row=0, column=3)
+label_day_pillar = tk.Label(advanced_frame, text=ui_text('label_day_pillar'))
+label_day_pillar.grid(row=0, column=4, sticky='e', padx=(12, 0), pady=4)
+entry_day_pillar = DunPillarEntry(advanced_frame)
+entry_day_pillar.grid(row=0, column=5)
+label_hour_pillar = tk.Label(advanced_frame, text=ui_text('label_hour_pillar'))
+label_hour_pillar.grid(row=0, column=6, sticky='e', padx=(12, 0), pady=4)
+entry_hour_pillar = DunPillarEntry(advanced_frame)
+entry_hour_pillar.grid(row=0, column=7)
+
+for _pillar_entry in (entry_year_pillar, entry_month_pillar, entry_day_pillar, entry_hour_pillar):
+    _inner = _pillar_entry.pillar if isinstance(_pillar_entry, DunPillarEntry) else _pillar_entry
+    _inner.tg_entry.bind('<FocusOut>', lambda event: refresh_dun_display())
+    _inner.dz_entry.bind('<FocusOut>', lambda event: refresh_dun_display())
+
+# 指定命宫 / 流年年份：参照图位于四柱下行、按钮上行（红框位置），主输入区内联展示
 label_specified_minggong = tk.Label(frame, text=ui_text('label_specified_minggong'))
-label_specified_minggong.grid(row=5, column=0, sticky='e')
+label_specified_minggong.grid(row=5, column=0, sticky='e', padx=(6, 0), pady=4)
 entry_specified_minggong = tk.Entry(frame, width=6)
 entry_specified_minggong.grid(row=5, column=1)
 label_flow_year = tk.Label(frame, text=ui_text('label_flow_year'))
-label_flow_year.grid(row=5, column=2, sticky='e')
+label_flow_year.grid(row=5, column=2, sticky='e', padx=(12, 0), pady=4)
 entry_flow_year = tk.Entry(frame, width=6)
 entry_flow_year.grid(row=5, column=3)
-btn_query = tk.Button(frame, text=t('btn_query'), command=query_minggong)
-btn_query.grid(row=6, column=0, columnspan=2, pady=10, sticky='w')
-btn_yuexian = tk.Button(frame, text=t('btn_yuexian'), command=query_yuexian)
-btn_yuexian.grid(row=6, column=2, columnspan=2, pady=10, sticky='w')
-btn_recalc_pillars = tk.Button(frame, text=t('btn_recalc'), command=force_recalc_pillars)
-btn_recalc_pillars.grid(row=6, column=4, columnspan=2, pady=10, sticky='w')
 
-result_frame = tk.LabelFrame(root, text=ui_text('result_frame_title'))
+btn_toggle_advanced = tk.Checkbutton(
+    frame, text='高级选项', variable=advanced_visible_var, command=toggle_advanced_options
+)
+btn_toggle_advanced.grid(row=6, column=0, columnspan=14, sticky='w', pady=(6, 0))
+# 与改写/差异文档一致：输入区只保留一个“排盘”按钮，点击后自动跳转到查询结果界面
+# （基本命盘、普通排盘、禄命排盘 均在结果页签内展示）
+btn_query = tk.Button(frame, text='开始排盘', command=start_chart_query)
+btn_query.grid(row=8, column=0, columnspan=2, pady=10, sticky='w')
+
+result_back_button = tk.Button(result_page, text='返回输入界面', command=show_input_page)
+result_back_button.pack(anchor='w', padx=20, pady=(10, 0))
+result_frame = tk.LabelFrame(result_page, text=ui_text('result_frame_title'))
 result_frame.pack(fill='both', expand=True, padx=20, pady=(0, 20))
-result_title_label = tk.Label(result_frame, text=ui_text('result_display_area'), anchor='w')
+result_notebook = ttk.Notebook(result_frame)
+result_notebook.pack(fill='both', expand=True, padx=4, pady=4)
+
+basic_result_frame = tk.Frame(result_notebook)
+ordinary_result_frame = tk.Frame(result_notebook)
+luming_result_frame = tk.Frame(result_notebook)
+result_notebook.add(basic_result_frame, text='基本命盘')
+result_notebook.add(ordinary_result_frame, text='普通排盘')
+result_notebook.add(luming_result_frame, text='禄命排盘')
+result_notebook.bind('<<NotebookTabChanged>>', on_result_tab_changed)
+
+result_title_label = tk.Label(basic_result_frame, text=ui_text('result_display_area'), anchor='w')
 result_title_label.pack(fill='x', padx=8, pady=(8, 0))
-result_info_label = tk.Label(result_frame, text='', anchor='w', justify='left')
+result_info_label = tk.Label(basic_result_frame, text='', anchor='w', justify='left')
 result_info_label.pack(fill='x', padx=8, pady=(4, 8))
 
-result_table_frame = tk.Frame(result_frame)
+result_table_frame = tk.Frame(basic_result_frame)
 result_table_frame.pack(fill='both', expand=True, padx=8, pady=4)
 columns = [ui_text('table_item')] + ui_month_headers()
 result_table = ttk.Treeview(result_table_frame, columns=columns, show='headings')
@@ -2763,8 +3607,75 @@ result_table.pack(side='left', fill='both', expand=True)
 scrollbar_v = tk.Scrollbar(result_table_frame, orient='vertical', command=result_table.yview)
 scrollbar_v.pack(side='right', fill='y')
 result_table.config(yscrollcommand=scrollbar_v.set)
-scrollbar_h = tk.Scrollbar(result_frame, orient='horizontal', command=result_table.xview)
+scrollbar_h = tk.Scrollbar(result_table_frame, orient='horizontal', command=result_table.xview)
 scrollbar_h.pack(fill='x')
 result_table.config(xscrollcommand=scrollbar_h.set)
 
-root.mainloop()
+result_ordinary_title_label = tk.Label(ordinary_result_frame, text='普通排盘', anchor='w')
+result_ordinary_title_label.pack(fill='x', padx=8, pady=(8, 0))
+result_ordinary_info_label = tk.Label(ordinary_result_frame, text='', anchor='w', justify='left')
+result_ordinary_info_label.pack(fill='x', padx=8, pady=(4, 8))
+# 横向流月条（置于下方网格之下）：默认显示“当下时间年份”的流月，选中流年格时即时切换
+ordinary_flow_month_frame, ordinary_flow_month_update, ordinary_flow_month_cells = create_flow_month_strip(ordinary_result_frame)
+# 大运密集网格（参照图格式）：顶行大运链 + 每步大运一行（块头 + 10 个流年格）
+ordinary_grid_holder = tk.Frame(ordinary_result_frame)
+
+
+def ordinary_on_year_select(year, block_row):
+    ordinary_flow_month_update.set_step(format_dayun_step_text(block_row))
+    ordinary_flow_month_update(year)
+
+
+ordinary_flow_grid = DayunFlowGrid(ordinary_grid_holder, on_year_select=ordinary_on_year_select)
+ordinary_flow_grid.pack(fill='both', expand=True)
+ordinary_grid_holder.pack(fill='both', expand=True, padx=8, pady=4)
+ordinary_flow_month_frame.pack(fill='x', padx=8, pady=(4, 8))
+
+luming_options = tk.Frame(luming_result_frame)
+luming_options.pack(anchor='nw', padx=12, pady=(6, 6))
+tk.Label(luming_options, text='排盘基准：').grid(row=0, column=0, sticky='w', pady=2)
+luming_base_var = tk.StringVar(value='日柱排盘')
+for column, label in enumerate(('年柱排盘', '月柱排盘', '日柱排盘', '时柱排盘'), start=1):
+    tk.Radiobutton(luming_options, text=label, variable=luming_base_var, value=label).grid(
+        row=0, column=column, sticky='w', padx=4
+    )
+tk.Label(luming_options, text='指定太极点：').grid(row=1, column=0, sticky='w', pady=2)
+luming_taiji_var = tk.StringVar(value='癸')
+ttk.Combobox(
+    luming_options, textvariable=luming_taiji_var,
+    values=('甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'),
+    state='readonly', width=5,
+).grid(row=1, column=1, sticky='w')
+tk.Label(luming_options, text='大运取柱：').grid(row=2, column=0, sticky='w', pady=2)
+luming_dayun_var = tk.StringVar(value='月柱排大运')
+for column, label in enumerate(('年柱排大运', '月柱排大运', '日柱排大运', '时柱排大运'), start=1):
+    tk.Radiobutton(luming_options, text=label, variable=luming_dayun_var, value=label).grid(
+        row=2, column=column, sticky='w', padx=4
+    )
+tk.Label(luming_options, text='大运方向：').grid(row=3, column=0, sticky='w', pady=2)
+luming_direction_var = tk.StringVar(value='大运顺排')
+tk.Radiobutton(luming_options, text='大运顺排', variable=luming_direction_var, value='大运顺排').grid(row=3, column=1, sticky='w')
+tk.Radiobutton(luming_options, text='大运逆排', variable=luming_direction_var, value='大运逆排').grid(row=3, column=2, sticky='w')
+tk.Button(luming_options, text='按所选条件排盘', command=query_luming).grid(
+    row=4, column=0, columnspan=3, sticky='w', pady=(4, 0)
+)
+luming_result_info_label = tk.Label(luming_result_frame, text='', anchor='w', justify='left')
+luming_result_info_label.pack(fill='x', padx=12, pady=(0, 8))
+# 横向流月条（置于下方网格之下）：默认显示“当下时间年份”的流月，选中流年格时即时切换
+luming_flow_month_frame, luming_flow_month_update, luming_flow_month_cells = create_flow_month_strip(luming_result_frame)
+# 大运密集网格（参照图格式）：顶行大运链 + 每步大运一行（块头 + 10 个流年格）
+luming_grid_holder = tk.Frame(luming_result_frame)
+
+
+def luming_on_year_select(year, block_row):
+    luming_flow_month_update.set_step(format_dayun_step_text(block_row))
+    luming_flow_month_update(year)
+
+
+luming_flow_grid = DayunFlowGrid(luming_grid_holder, on_year_select=luming_on_year_select)
+luming_flow_grid.pack(fill='both', expand=True)
+luming_grid_holder.pack(fill='both', expand=True, padx=12, pady=(0, 4))
+luming_flow_month_frame.pack(fill='x', padx=12, pady=(4, 8))
+
+if __name__ == '__main__':
+    root.mainloop()
