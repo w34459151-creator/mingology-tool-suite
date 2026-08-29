@@ -60,3 +60,23 @@ def test_explicit_standard_time_overrides_automatic_daylight_time():
 
     assert context['summer_time_enabled'] is False
     assert context['standard_dt'] == context['input_dt']
+
+def main():
+    test_kaili_case()
+    test_location_record_has_coordinates()
+    test_true_solar_datetime_can_cross_day_boundary()
+    test_china_historical_daylight_time_is_detected_and_removed()
+    test_explicit_standard_time_overrides_automatic_daylight_time()
+    print('全部测试通过')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        raise SystemExit(1)
+    finally:
+        input('测试结束，按回车键关闭窗口...')
+
