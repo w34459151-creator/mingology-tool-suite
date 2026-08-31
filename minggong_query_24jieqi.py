@@ -3407,275 +3407,283 @@ def query_yuexian():
     summary = format_summary_lines(summary_lines)
     display_result_table(rt('result_title_bazi'), summary, rows)
 
-root = tk.Tk()
-root.title(t('app_title'))
-# 结果表格含13列（项目+12月），默认按内容自适应可能超出屏幕宽度，启动时最大化窗口以完整显示
-try:
-    root.state('zoomed')
-except tk.TclError:
-    root.geometry(f"{root.winfo_screenwidth()}x{root.winfo_screenheight()}+0+0")
+def run_app(root=None):
+    """Initialize and display the mingong query UI.
+    If root is supplied, use it as the top-level window; otherwise create one.
+    Called from main.py (or run standalone via __main__)."""
+    if root is None:
+        root = tk.Tk()
+    globals()['root'] = root
+    root.title(t('app_title'))
+    # 结果表格含13列（项目+12月），默认按内容自适应可能超出屏幕宽度，启动时最大化窗口以完整显示
+    try:
+        root.state('zoomed')
+    except tk.TclError:
+        root.geometry(f"{root.winfo_screenwidth()}x{root.winfo_screenheight()}+0+0")
 
-input_page = tk.Frame(root)
-result_page = tk.Frame(root)
-input_page.pack(fill='both', expand=True)
-
-frame = tk.Frame(input_page)
-frame.pack(padx=12, pady=20, anchor='w')
-
-# 顶部“类型 / 性别 / 语言”行放入独立子容器（占用 col0-13 整行）：其较宽控件不再撑大外层网格
-# 的共享列宽，使下方的日期行（含右侧 出生地/平气法·定气法）在较窄屏幕上也能完整横向显示。
-top_group = tk.Frame(frame)
-top_group.grid(row=0, column=0, columnspan=14, sticky='w')
-
-var = tk.StringVar(value='阳历')
-var.trace_add('write', refresh_summer_time_suggestion)
-
-label_calendar = tk.Label(top_group, text=t('label_calendar'))
-label_calendar.grid(row=0, column=0, sticky='e')
-radio_solar = tk.Radiobutton(top_group, text=t('radio_solar'), variable=var, value='阳历', command=update_pillars_from_date)
-radio_solar.grid(row=0, column=1, sticky='w')
-radio_lunar = tk.Radiobutton(top_group, text=t('radio_lunar'), variable=var, value='农历', command=update_pillars_from_date)
-radio_lunar.grid(row=0, column=2, sticky='w')
-label_gender = tk.Label(top_group, text=t('label_gender'))
-label_gender.grid(row=0, column=3, sticky='e', padx=(8, 0))
-gender_var = tk.StringVar(value='男')
-radio_male = tk.Radiobutton(top_group, text=t('radio_male'), variable=gender_var, value='男')
-radio_male.grid(row=0, column=4, sticky='w')
-radio_female = tk.Radiobutton(top_group, text=t('radio_female'), variable=gender_var, value='女')
-radio_female.grid(row=0, column=5, sticky='w')
-
-label_language = tk.Label(top_group, text=t('label_language'))
-label_language.grid(row=0, column=6, sticky='e', padx=(8, 0))
-language_choice_var = tk.StringVar(value='中国（大陆）')
-combo_language = ttk.Combobox(
-    top_group,
-    textvariable=language_choice_var,
-    values=list(COUNTRY_LANGUAGE_MAP.keys()),
-    state='readonly',
-    width=12,
-)
-combo_language.grid(row=0, column=7, sticky='w')
-combo_language.bind('<<ComboboxSelected>>', on_language_select)
-
-# 姓名（与 差异.docx image1 参考图一致；仅展示用，不影响排盘计算）
-label_name = tk.Label(top_group, text='姓名')
-label_name.grid(row=0, column=8, sticky='e', padx=(12, 0))
-entry_name = tk.Entry(top_group, width=12)
-entry_name.grid(row=0, column=9, sticky='w')
-entry_name.insert(0, '')
-
-month_method_var = tk.StringVar(value='定气法')
-
-entry_year = tk.Entry(frame, width=6)
-entry_year.grid(row=2, column=0)
-label_year_unit = tk.Label(frame, text=ui_text('unit_year'))
-label_year_unit.grid(row=2, column=1, sticky='w')
-entry_month = tk.Entry(frame, width=3)
-entry_month.grid(row=2, column=2)
-label_month_unit = tk.Label(frame, text=ui_text('unit_month'))
-label_month_unit.grid(row=2, column=3, sticky='w')
-entry_day = tk.Entry(frame, width=3)
-entry_day.grid(row=2, column=4)
-label_day_unit = tk.Label(frame, text=ui_text('unit_day'))
-label_day_unit.grid(row=2, column=5, sticky='w')
-entry_hour = tk.Entry(frame, width=6)
-entry_hour.grid(row=2, column=6)
-label_hour_unit = tk.Label(frame, text=ui_text('unit_hour'))
-label_hour_unit.grid(row=2, column=7, sticky='w')
-
-summer_time_var = tk.BooleanVar(value=False)
-summer_time_var.trace_add('write', update_true_solar_preview)
-check_summer_time = tk.Checkbutton(
-    frame,
-    text=t('check_summer_time'),
-    variable=summer_time_var,
-)
-check_summer_time.grid(row=3, column=8, columnspan=3, sticky='w', pady=(2, 0))
-summer_time_hint_label = tk.Label(frame, text='', anchor='w', justify='left', fg='#8a4b08')
-summer_time_hint_label.grid(row=3, column=11, columnspan=3, sticky='w', padx=(8, 0), pady=(2, 0))
-# 真太阳时 / 地址经纬 实时预览（与 差异.docx image1 参考图一致：查询页即显示换算结果）
-true_solar_preview_label = tk.Label(frame, text='', anchor='w', justify='left', fg='#2f5d2f')
-true_solar_preview_label.grid(row=4, column=0, columnspan=14, sticky='we', padx=(6, 0), pady=(2, 0))
-
-label_birthplace = tk.Label(frame, text=t('label_birthplace'))
-label_birthplace.grid(row=2, column=8, sticky='e', padx=(6, 0))
-entry_birthplace = tk.Entry(frame, width=14, state='readonly')
-entry_birthplace.grid(row=2, column=9, sticky='w')
-btn_pick_birthplace = tk.Button(frame, text=t('btn_pick_birthplace'), command=open_birthplace_selector)
-btn_pick_birthplace.grid(row=2, column=10, sticky='w', padx=(4, 0))
-
-entry_year.bind('<FocusOut>', lambda event: update_pillars_from_date())
-entry_month.bind('<FocusOut>', lambda event: update_pillars_from_date())
-entry_day.bind('<FocusOut>', lambda event: update_pillars_from_date())
-entry_hour.bind('<FocusOut>', lambda event: update_pillars_from_date())
-for _date_entry in (entry_year, entry_month, entry_day, entry_hour):
-    _date_entry.bind('<FocusOut>', refresh_summer_time_suggestion, add='+')
-refresh_summer_time_suggestion()
-
-# 指定命宫 / 流年 / 平气·定气法：按《改写》参照图红框位置内联展示在主输入区；
-# 四柱（自动填柱的可覆盖项）保留在可折叠“高级选项”内。
-advanced_visible_var = tk.BooleanVar(value=False)
-advanced_frame = tk.LabelFrame(frame, text='高级选项（四柱）')
-advanced_frame.grid(row=7, column=0, columnspan=14, sticky='ew')
-advanced_frame.grid_remove()
-
-# 平气法 / 定气法：参照图位于顶部日期行最右侧（出生地选择按钮旁）
-radio_pingqi = tk.Radiobutton(frame, text=t('radio_pingqi'), variable=month_method_var, value='平气法')
-radio_pingqi.grid(row=2, column=11, sticky='w', padx=(6, 0))
-radio_dingqi = tk.Radiobutton(frame, text=t('radio_dingqi'), variable=month_method_var, value='定气法')
-radio_dingqi.grid(row=2, column=12, sticky='w')
-
-
-def toggle_advanced_options():
-    if advanced_visible_var.get():
-        advanced_frame.grid()
-    else:
-        advanced_frame.grid_remove()
-
-
-label_year_pillar = tk.Label(advanced_frame, text=ui_text('label_year_pillar'))
-label_year_pillar.grid(row=0, column=0, sticky='e', padx=(6, 0), pady=4)
-entry_year_pillar = PillarEntry(advanced_frame)
-entry_year_pillar.grid(row=0, column=1)
-label_month_pillar = tk.Label(advanced_frame, text=ui_text('label_month_pillar'))
-label_month_pillar.grid(row=0, column=2, sticky='e', padx=(12, 0), pady=4)
-entry_month_pillar = PillarEntry(advanced_frame)
-entry_month_pillar.grid(row=0, column=3)
-label_day_pillar = tk.Label(advanced_frame, text=ui_text('label_day_pillar'))
-label_day_pillar.grid(row=0, column=4, sticky='e', padx=(12, 0), pady=4)
-entry_day_pillar = DunPillarEntry(advanced_frame)
-entry_day_pillar.grid(row=0, column=5)
-label_hour_pillar = tk.Label(advanced_frame, text=ui_text('label_hour_pillar'))
-label_hour_pillar.grid(row=0, column=6, sticky='e', padx=(12, 0), pady=4)
-entry_hour_pillar = DunPillarEntry(advanced_frame)
-entry_hour_pillar.grid(row=0, column=7)
-
-for _pillar_entry in (entry_year_pillar, entry_month_pillar, entry_day_pillar, entry_hour_pillar):
-    _inner = _pillar_entry.pillar if isinstance(_pillar_entry, DunPillarEntry) else _pillar_entry
-    _inner.tg_entry.bind('<FocusOut>', lambda event: refresh_dun_display())
-    _inner.dz_entry.bind('<FocusOut>', lambda event: refresh_dun_display())
-
-# 指定命宫 / 流年年份：参照图位于四柱下行、按钮上行（红框位置），主输入区内联展示
-label_specified_minggong = tk.Label(frame, text=ui_text('label_specified_minggong'))
-label_specified_minggong.grid(row=5, column=0, sticky='e', padx=(6, 0), pady=4)
-entry_specified_minggong = tk.Entry(frame, width=6)
-entry_specified_minggong.grid(row=5, column=1)
-label_flow_year = tk.Label(frame, text=ui_text('label_flow_year'))
-label_flow_year.grid(row=5, column=2, sticky='e', padx=(12, 0), pady=4)
-entry_flow_year = tk.Entry(frame, width=6)
-entry_flow_year.grid(row=5, column=3)
-
-btn_toggle_advanced = tk.Checkbutton(
-    frame, text='高级选项', variable=advanced_visible_var, command=toggle_advanced_options
-)
-btn_toggle_advanced.grid(row=6, column=0, columnspan=14, sticky='w', pady=(6, 0))
-# 与改写/差异文档一致：输入区只保留一个“排盘”按钮，点击后自动跳转到查询结果界面
-# （基本命盘、普通排盘、禄命排盘 均在结果页签内展示）
-btn_query = tk.Button(frame, text='开始排盘', command=start_chart_query)
-btn_query.grid(row=8, column=0, columnspan=2, pady=10, sticky='w')
-
-result_back_button = tk.Button(result_page, text='返回输入界面', command=show_input_page)
-result_back_button.pack(anchor='w', padx=20, pady=(10, 0))
-result_frame = tk.LabelFrame(result_page, text=ui_text('result_frame_title'))
-result_frame.pack(fill='both', expand=True, padx=20, pady=(0, 20))
-result_notebook = ttk.Notebook(result_frame)
-result_notebook.pack(fill='both', expand=True, padx=4, pady=4)
-
-basic_result_frame = tk.Frame(result_notebook)
-ordinary_result_frame = tk.Frame(result_notebook)
-luming_result_frame = tk.Frame(result_notebook)
-result_notebook.add(basic_result_frame, text='基本命盘')
-result_notebook.add(ordinary_result_frame, text='普通排盘')
-result_notebook.add(luming_result_frame, text='禄命排盘')
-result_notebook.bind('<<NotebookTabChanged>>', on_result_tab_changed)
-
-result_title_label = tk.Label(basic_result_frame, text=ui_text('result_display_area'), anchor='w')
-result_title_label.pack(fill='x', padx=8, pady=(8, 0))
-result_info_label = tk.Label(basic_result_frame, text='', anchor='w', justify='left')
-result_info_label.pack(fill='x', padx=8, pady=(4, 8))
-
-result_table_frame = tk.Frame(basic_result_frame)
-result_table_frame.pack(fill='both', expand=True, padx=8, pady=4)
-columns = [ui_text('table_item')] + ui_month_headers()
-result_table = ttk.Treeview(result_table_frame, columns=columns, show='headings')
-for i, col in enumerate(columns):
-    result_table.heading(col, text=col)
-    width = 110 if i == 0 else 80
-    result_table.column(col, width=width, anchor='center')
-result_table.pack(side='left', fill='both', expand=True)
-
-scrollbar_v = tk.Scrollbar(result_table_frame, orient='vertical', command=result_table.yview)
-scrollbar_v.pack(side='right', fill='y')
-result_table.config(yscrollcommand=scrollbar_v.set)
-scrollbar_h = tk.Scrollbar(result_table_frame, orient='horizontal', command=result_table.xview)
-scrollbar_h.pack(fill='x')
-result_table.config(xscrollcommand=scrollbar_h.set)
-
-result_ordinary_title_label = tk.Label(ordinary_result_frame, text='普通排盘', anchor='w')
-result_ordinary_title_label.pack(fill='x', padx=8, pady=(8, 0))
-result_ordinary_info_label = tk.Label(ordinary_result_frame, text='', anchor='w', justify='left')
-result_ordinary_info_label.pack(fill='x', padx=8, pady=(4, 8))
-# 横向流月条（置于下方网格之下）：默认显示“当下时间年份”的流月，选中流年格时即时切换
-ordinary_flow_month_frame, ordinary_flow_month_update, ordinary_flow_month_cells = create_flow_month_strip(ordinary_result_frame)
-# 大运密集网格（参照图格式）：顶行大运链 + 每步大运一行（块头 + 10 个流年格）
-ordinary_grid_holder = tk.Frame(ordinary_result_frame)
-
-
-def ordinary_on_year_select(year, block_row):
-    ordinary_flow_month_update.set_step(format_dayun_step_text(block_row))
-    ordinary_flow_month_update(year)
-
-
-ordinary_flow_grid = DayunFlowGrid(ordinary_grid_holder, on_year_select=ordinary_on_year_select)
-ordinary_flow_grid.pack(fill='both', expand=True)
-ordinary_grid_holder.pack(fill='both', expand=True, padx=8, pady=4)
-ordinary_flow_month_frame.pack(fill='x', padx=8, pady=(4, 8))
-
-luming_options = tk.Frame(luming_result_frame)
-luming_options.pack(anchor='nw', padx=12, pady=(6, 6))
-tk.Label(luming_options, text='排盘基准：').grid(row=0, column=0, sticky='w', pady=2)
-luming_base_var = tk.StringVar(value='日柱排盘')
-for column, label in enumerate(('年柱排盘', '月柱排盘', '日柱排盘', '时柱排盘'), start=1):
-    tk.Radiobutton(luming_options, text=label, variable=luming_base_var, value=label).grid(
-        row=0, column=column, sticky='w', padx=4
+    input_page = tk.Frame(root)
+    result_page = tk.Frame(root)
+    input_page.pack(fill='both', expand=True)
+    
+    frame = tk.Frame(input_page)
+    frame.pack(padx=12, pady=20, anchor='w')
+    
+    # 顶部“类型 / 性别 / 语言”行放入独立子容器（占用 col0-13 整行）：其较宽控件不再撑大外层网格
+    # 的共享列宽，使下方的日期行（含右侧 出生地/平气法·定气法）在较窄屏幕上也能完整横向显示。
+    top_group = tk.Frame(frame)
+    top_group.grid(row=0, column=0, columnspan=14, sticky='w')
+    
+    var = tk.StringVar(value='阳历')
+    var.trace_add('write', refresh_summer_time_suggestion)
+    
+    label_calendar = tk.Label(top_group, text=t('label_calendar'))
+    label_calendar.grid(row=0, column=0, sticky='e')
+    radio_solar = tk.Radiobutton(top_group, text=t('radio_solar'), variable=var, value='阳历', command=update_pillars_from_date)
+    radio_solar.grid(row=0, column=1, sticky='w')
+    radio_lunar = tk.Radiobutton(top_group, text=t('radio_lunar'), variable=var, value='农历', command=update_pillars_from_date)
+    radio_lunar.grid(row=0, column=2, sticky='w')
+    label_gender = tk.Label(top_group, text=t('label_gender'))
+    label_gender.grid(row=0, column=3, sticky='e', padx=(8, 0))
+    gender_var = tk.StringVar(value='男')
+    radio_male = tk.Radiobutton(top_group, text=t('radio_male'), variable=gender_var, value='男')
+    radio_male.grid(row=0, column=4, sticky='w')
+    radio_female = tk.Radiobutton(top_group, text=t('radio_female'), variable=gender_var, value='女')
+    radio_female.grid(row=0, column=5, sticky='w')
+    
+    label_language = tk.Label(top_group, text=t('label_language'))
+    label_language.grid(row=0, column=6, sticky='e', padx=(8, 0))
+    language_choice_var = tk.StringVar(value='中国（大陆）')
+    combo_language = ttk.Combobox(
+        top_group,
+        textvariable=language_choice_var,
+        values=list(COUNTRY_LANGUAGE_MAP.keys()),
+        state='readonly',
+        width=12,
     )
-tk.Label(luming_options, text='指定太极点：').grid(row=1, column=0, sticky='w', pady=2)
-luming_taiji_var = tk.StringVar(value='癸')
-ttk.Combobox(
-    luming_options, textvariable=luming_taiji_var,
-    values=('甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'),
-    state='readonly', width=5,
-).grid(row=1, column=1, sticky='w')
-tk.Label(luming_options, text='大运取柱：').grid(row=2, column=0, sticky='w', pady=2)
-luming_dayun_var = tk.StringVar(value='月柱排大运')
-for column, label in enumerate(('年柱排大运', '月柱排大运', '日柱排大运', '时柱排大运'), start=1):
-    tk.Radiobutton(luming_options, text=label, variable=luming_dayun_var, value=label).grid(
-        row=2, column=column, sticky='w', padx=4
+    combo_language.grid(row=0, column=7, sticky='w')
+    combo_language.bind('<<ComboboxSelected>>', on_language_select)
+    
+    # 姓名（与 差异.docx image1 参考图一致；仅展示用，不影响排盘计算）
+    label_name = tk.Label(top_group, text='姓名')
+    label_name.grid(row=0, column=8, sticky='e', padx=(12, 0))
+    entry_name = tk.Entry(top_group, width=12)
+    entry_name.grid(row=0, column=9, sticky='w')
+    entry_name.insert(0, '')
+    
+    month_method_var = tk.StringVar(value='定气法')
+    
+    entry_year = tk.Entry(frame, width=6)
+    entry_year.grid(row=2, column=0)
+    label_year_unit = tk.Label(frame, text=ui_text('unit_year'))
+    label_year_unit.grid(row=2, column=1, sticky='w')
+    entry_month = tk.Entry(frame, width=3)
+    entry_month.grid(row=2, column=2)
+    label_month_unit = tk.Label(frame, text=ui_text('unit_month'))
+    label_month_unit.grid(row=2, column=3, sticky='w')
+    entry_day = tk.Entry(frame, width=3)
+    entry_day.grid(row=2, column=4)
+    label_day_unit = tk.Label(frame, text=ui_text('unit_day'))
+    label_day_unit.grid(row=2, column=5, sticky='w')
+    entry_hour = tk.Entry(frame, width=6)
+    entry_hour.grid(row=2, column=6)
+    label_hour_unit = tk.Label(frame, text=ui_text('unit_hour'))
+    label_hour_unit.grid(row=2, column=7, sticky='w')
+    
+    summer_time_var = tk.BooleanVar(value=False)
+    summer_time_var.trace_add('write', update_true_solar_preview)
+    check_summer_time = tk.Checkbutton(
+        frame,
+        text=t('check_summer_time'),
+        variable=summer_time_var,
     )
-tk.Label(luming_options, text='大运方向：').grid(row=3, column=0, sticky='w', pady=2)
-luming_direction_var = tk.StringVar(value='大运顺排')
-tk.Radiobutton(luming_options, text='大运顺排', variable=luming_direction_var, value='大运顺排').grid(row=3, column=1, sticky='w')
-tk.Radiobutton(luming_options, text='大运逆排', variable=luming_direction_var, value='大运逆排').grid(row=3, column=2, sticky='w')
-tk.Button(luming_options, text='按所选条件排盘', command=query_luming).grid(
-    row=4, column=0, columnspan=3, sticky='w', pady=(4, 0)
-)
-luming_result_info_label = tk.Label(luming_result_frame, text='', anchor='w', justify='left')
-luming_result_info_label.pack(fill='x', padx=12, pady=(0, 8))
-# 横向流月条（置于下方网格之下）：默认显示“当下时间年份”的流月，选中流年格时即时切换
-luming_flow_month_frame, luming_flow_month_update, luming_flow_month_cells = create_flow_month_strip(luming_result_frame)
-# 大运密集网格（参照图格式）：顶行大运链 + 每步大运一行（块头 + 10 个流年格）
-luming_grid_holder = tk.Frame(luming_result_frame)
+    check_summer_time.grid(row=3, column=8, columnspan=3, sticky='w', pady=(2, 0))
+    summer_time_hint_label = tk.Label(frame, text='', anchor='w', justify='left', fg='#8a4b08')
+    summer_time_hint_label.grid(row=3, column=11, columnspan=3, sticky='w', padx=(8, 0), pady=(2, 0))
+    # 真太阳时 / 地址经纬 实时预览（与 差异.docx image1 参考图一致：查询页即显示换算结果）
+    true_solar_preview_label = tk.Label(frame, text='', anchor='w', justify='left', fg='#2f5d2f')
+    true_solar_preview_label.grid(row=4, column=0, columnspan=14, sticky='we', padx=(6, 0), pady=(2, 0))
+    
+    label_birthplace = tk.Label(frame, text=t('label_birthplace'))
+    label_birthplace.grid(row=2, column=8, sticky='e', padx=(6, 0))
+    entry_birthplace = tk.Entry(frame, width=14, state='readonly')
+    entry_birthplace.grid(row=2, column=9, sticky='w')
+    btn_pick_birthplace = tk.Button(frame, text=t('btn_pick_birthplace'), command=open_birthplace_selector)
+    btn_pick_birthplace.grid(row=2, column=10, sticky='w', padx=(4, 0))
+    
+    entry_year.bind('<FocusOut>', lambda event: update_pillars_from_date())
+    entry_month.bind('<FocusOut>', lambda event: update_pillars_from_date())
+    entry_day.bind('<FocusOut>', lambda event: update_pillars_from_date())
+    entry_hour.bind('<FocusOut>', lambda event: update_pillars_from_date())
+    for _date_entry in (entry_year, entry_month, entry_day, entry_hour):
+        _date_entry.bind('<FocusOut>', refresh_summer_time_suggestion, add='+')
+    refresh_summer_time_suggestion()
+    
+    # 指定命宫 / 流年 / 平气·定气法：按《改写》参照图红框位置内联展示在主输入区；
+    # 四柱（自动填柱的可覆盖项）保留在可折叠“高级选项”内。
+    advanced_visible_var = tk.BooleanVar(value=False)
+    advanced_frame = tk.LabelFrame(frame, text='高级选项（四柱）')
+    advanced_frame.grid(row=7, column=0, columnspan=14, sticky='ew')
+    advanced_frame.grid_remove()
+    
+    # 平气法 / 定气法：参照图位于顶部日期行最右侧（出生地选择按钮旁）
+    radio_pingqi = tk.Radiobutton(frame, text=t('radio_pingqi'), variable=month_method_var, value='平气法')
+    radio_pingqi.grid(row=2, column=11, sticky='w', padx=(6, 0))
+    radio_dingqi = tk.Radiobutton(frame, text=t('radio_dingqi'), variable=month_method_var, value='定气法')
+    radio_dingqi.grid(row=2, column=12, sticky='w')
+    
+    
+    def toggle_advanced_options():
+        if advanced_visible_var.get():
+            advanced_frame.grid()
+        else:
+            advanced_frame.grid_remove()
+    
+    
+    label_year_pillar = tk.Label(advanced_frame, text=ui_text('label_year_pillar'))
+    label_year_pillar.grid(row=0, column=0, sticky='e', padx=(6, 0), pady=4)
+    entry_year_pillar = PillarEntry(advanced_frame)
+    entry_year_pillar.grid(row=0, column=1)
+    label_month_pillar = tk.Label(advanced_frame, text=ui_text('label_month_pillar'))
+    label_month_pillar.grid(row=0, column=2, sticky='e', padx=(12, 0), pady=4)
+    entry_month_pillar = PillarEntry(advanced_frame)
+    entry_month_pillar.grid(row=0, column=3)
+    label_day_pillar = tk.Label(advanced_frame, text=ui_text('label_day_pillar'))
+    label_day_pillar.grid(row=0, column=4, sticky='e', padx=(12, 0), pady=4)
+    entry_day_pillar = DunPillarEntry(advanced_frame)
+    entry_day_pillar.grid(row=0, column=5)
+    label_hour_pillar = tk.Label(advanced_frame, text=ui_text('label_hour_pillar'))
+    label_hour_pillar.grid(row=0, column=6, sticky='e', padx=(12, 0), pady=4)
+    entry_hour_pillar = DunPillarEntry(advanced_frame)
+    entry_hour_pillar.grid(row=0, column=7)
+    
+    for _pillar_entry in (entry_year_pillar, entry_month_pillar, entry_day_pillar, entry_hour_pillar):
+        _inner = _pillar_entry.pillar if isinstance(_pillar_entry, DunPillarEntry) else _pillar_entry
+        _inner.tg_entry.bind('<FocusOut>', lambda event: refresh_dun_display())
+        _inner.dz_entry.bind('<FocusOut>', lambda event: refresh_dun_display())
+    
+    # 指定命宫 / 流年年份：参照图位于四柱下行、按钮上行（红框位置），主输入区内联展示
+    label_specified_minggong = tk.Label(frame, text=ui_text('label_specified_minggong'))
+    label_specified_minggong.grid(row=5, column=0, sticky='e', padx=(6, 0), pady=4)
+    entry_specified_minggong = tk.Entry(frame, width=6)
+    entry_specified_minggong.grid(row=5, column=1)
+    label_flow_year = tk.Label(frame, text=ui_text('label_flow_year'))
+    label_flow_year.grid(row=5, column=2, sticky='e', padx=(12, 0), pady=4)
+    entry_flow_year = tk.Entry(frame, width=6)
+    entry_flow_year.grid(row=5, column=3)
+    
+    btn_toggle_advanced = tk.Checkbutton(
+        frame, text='高级选项', variable=advanced_visible_var, command=toggle_advanced_options
+    )
+    btn_toggle_advanced.grid(row=6, column=0, columnspan=14, sticky='w', pady=(6, 0))
+    # 与改写/差异文档一致：输入区只保留一个“排盘”按钮，点击后自动跳转到查询结果界面
+    # （基本命盘、普通排盘、禄命排盘 均在结果页签内展示）
+    btn_query = tk.Button(frame, text='开始排盘', command=start_chart_query)
+    btn_query.grid(row=8, column=0, columnspan=2, pady=10, sticky='w')
+    
+    result_back_button = tk.Button(result_page, text='返回输入界面', command=show_input_page)
+    result_back_button.pack(anchor='w', padx=20, pady=(10, 0))
+    result_frame = tk.LabelFrame(result_page, text=ui_text('result_frame_title'))
+    result_frame.pack(fill='both', expand=True, padx=20, pady=(0, 20))
+    result_notebook = ttk.Notebook(result_frame)
+    result_notebook.pack(fill='both', expand=True, padx=4, pady=4)
+    
+    basic_result_frame = tk.Frame(result_notebook)
+    ordinary_result_frame = tk.Frame(result_notebook)
+    luming_result_frame = tk.Frame(result_notebook)
+    result_notebook.add(basic_result_frame, text='基本命盘')
+    result_notebook.add(ordinary_result_frame, text='普通排盘')
+    result_notebook.add(luming_result_frame, text='禄命排盘')
+    result_notebook.bind('<<NotebookTabChanged>>', on_result_tab_changed)
+    
+    result_title_label = tk.Label(basic_result_frame, text=ui_text('result_display_area'), anchor='w')
+    result_title_label.pack(fill='x', padx=8, pady=(8, 0))
+    result_info_label = tk.Label(basic_result_frame, text='', anchor='w', justify='left')
+    result_info_label.pack(fill='x', padx=8, pady=(4, 8))
+    
+    result_table_frame = tk.Frame(basic_result_frame)
+    result_table_frame.pack(fill='both', expand=True, padx=8, pady=4)
+    columns = [ui_text('table_item')] + ui_month_headers()
+    result_table = ttk.Treeview(result_table_frame, columns=columns, show='headings')
+    for i, col in enumerate(columns):
+        result_table.heading(col, text=col)
+        width = 110 if i == 0 else 80
+        result_table.column(col, width=width, anchor='center')
+    result_table.pack(side='left', fill='both', expand=True)
+    
+    scrollbar_v = tk.Scrollbar(result_table_frame, orient='vertical', command=result_table.yview)
+    scrollbar_v.pack(side='right', fill='y')
+    result_table.config(yscrollcommand=scrollbar_v.set)
+    scrollbar_h = tk.Scrollbar(result_table_frame, orient='horizontal', command=result_table.xview)
+    scrollbar_h.pack(fill='x')
+    result_table.config(xscrollcommand=scrollbar_h.set)
+    
+    result_ordinary_title_label = tk.Label(ordinary_result_frame, text='普通排盘', anchor='w')
+    result_ordinary_title_label.pack(fill='x', padx=8, pady=(8, 0))
+    result_ordinary_info_label = tk.Label(ordinary_result_frame, text='', anchor='w', justify='left')
+    result_ordinary_info_label.pack(fill='x', padx=8, pady=(4, 8))
+    # 横向流月条（置于下方网格之下）：默认显示“当下时间年份”的流月，选中流年格时即时切换
+    ordinary_flow_month_frame, ordinary_flow_month_update, ordinary_flow_month_cells = create_flow_month_strip(ordinary_result_frame)
+    # 大运密集网格（参照图格式）：顶行大运链 + 每步大运一行（块头 + 10 个流年格）
+    ordinary_grid_holder = tk.Frame(ordinary_result_frame)
+    
+    
+    def ordinary_on_year_select(year, block_row):
+        ordinary_flow_month_update.set_step(format_dayun_step_text(block_row))
+        ordinary_flow_month_update(year)
+    
+    
+    ordinary_flow_grid = DayunFlowGrid(ordinary_grid_holder, on_year_select=ordinary_on_year_select)
+    ordinary_flow_grid.pack(fill='both', expand=True)
+    ordinary_grid_holder.pack(fill='both', expand=True, padx=8, pady=4)
+    ordinary_flow_month_frame.pack(fill='x', padx=8, pady=(4, 8))
+    
+    luming_options = tk.Frame(luming_result_frame)
+    luming_options.pack(anchor='nw', padx=12, pady=(6, 6))
+    tk.Label(luming_options, text='排盘基准：').grid(row=0, column=0, sticky='w', pady=2)
+    luming_base_var = tk.StringVar(value='日柱排盘')
+    for column, label in enumerate(('年柱排盘', '月柱排盘', '日柱排盘', '时柱排盘'), start=1):
+        tk.Radiobutton(luming_options, text=label, variable=luming_base_var, value=label).grid(
+            row=0, column=column, sticky='w', padx=4
+        )
+    tk.Label(luming_options, text='指定太极点：').grid(row=1, column=0, sticky='w', pady=2)
+    luming_taiji_var = tk.StringVar(value='癸')
+    ttk.Combobox(
+        luming_options, textvariable=luming_taiji_var,
+        values=('甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'),
+        state='readonly', width=5,
+    ).grid(row=1, column=1, sticky='w')
+    tk.Label(luming_options, text='大运取柱：').grid(row=2, column=0, sticky='w', pady=2)
+    luming_dayun_var = tk.StringVar(value='月柱排大运')
+    for column, label in enumerate(('年柱排大运', '月柱排大运', '日柱排大运', '时柱排大运'), start=1):
+        tk.Radiobutton(luming_options, text=label, variable=luming_dayun_var, value=label).grid(
+            row=2, column=column, sticky='w', padx=4
+        )
+    tk.Label(luming_options, text='大运方向：').grid(row=3, column=0, sticky='w', pady=2)
+    luming_direction_var = tk.StringVar(value='大运顺排')
+    tk.Radiobutton(luming_options, text='大运顺排', variable=luming_direction_var, value='大运顺排').grid(row=3, column=1, sticky='w')
+    tk.Radiobutton(luming_options, text='大运逆排', variable=luming_direction_var, value='大运逆排').grid(row=3, column=2, sticky='w')
+    tk.Button(luming_options, text='按所选条件排盘', command=query_luming).grid(
+        row=4, column=0, columnspan=3, sticky='w', pady=(4, 0)
+    )
+    luming_result_info_label = tk.Label(luming_result_frame, text='', anchor='w', justify='left')
+    luming_result_info_label.pack(fill='x', padx=12, pady=(0, 8))
+    # 横向流月条（置于下方网格之下）：默认显示“当下时间年份”的流月，选中流年格时即时切换
+    luming_flow_month_frame, luming_flow_month_update, luming_flow_month_cells = create_flow_month_strip(luming_result_frame)
+    # 大运密集网格（参照图格式）：顶行大运链 + 每步大运一行（块头 + 10 个流年格）
+    luming_grid_holder = tk.Frame(luming_result_frame)
+    
+    
+    def luming_on_year_select(year, block_row):
+        luming_flow_month_update.set_step(format_dayun_step_text(block_row))
+        luming_flow_month_update(year)
+    
+    
+    luming_flow_grid = DayunFlowGrid(luming_grid_holder, on_year_select=luming_on_year_select)
+    luming_flow_grid.pack(fill='both', expand=True)
+    luming_grid_holder.pack(fill='both', expand=True, padx=12, pady=(0, 4))
+    luming_flow_month_frame.pack(fill='x', padx=12, pady=(4, 8))
+    root.mainloop()
 
-
-def luming_on_year_select(year, block_row):
-    luming_flow_month_update.set_step(format_dayun_step_text(block_row))
-    luming_flow_month_update(year)
-
-
-luming_flow_grid = DayunFlowGrid(luming_grid_holder, on_year_select=luming_on_year_select)
-luming_flow_grid.pack(fill='both', expand=True)
-luming_grid_holder.pack(fill='both', expand=True, padx=12, pady=(0, 4))
-luming_flow_month_frame.pack(fill='x', padx=12, pady=(4, 8))
 
 if __name__ == '__main__':
-    root.mainloop()
+    run_app()
